@@ -66,11 +66,11 @@ pub struct RemoveQueueQuery {
     pub blocklist: bool,
 }
 
-struct LiveStatus {
-    progress: f64,
-    speed: i64,
-    eta: Option<i64>,
-    state: Option<&'static str>,
+pub(crate) struct LiveStatus {
+    pub(crate) progress: f64,
+    pub(crate) speed: i64,
+    pub(crate) eta: Option<i64>,
+    pub(crate) state: Option<&'static str>,
 }
 
 fn failed(error: impl std::fmt::Display) -> Problem {
@@ -99,7 +99,7 @@ fn map_sab_state(raw: &str) -> Option<&'static str> {
     }
 }
 
-fn status_from_torrent(torrent: &Torrent) -> LiveStatus {
+pub(crate) fn status_from_torrent(torrent: &Torrent) -> LiveStatus {
     let eta = (torrent.eta >= 0 && torrent.eta < QB_UNKNOWN_ETA).then_some(torrent.eta);
     LiveStatus {
         progress: torrent.progress.clamp(0.0, 1.0),
@@ -109,7 +109,7 @@ fn status_from_torrent(torrent: &Torrent) -> LiveStatus {
     }
 }
 
-fn status_from_sab(slot: &SabSlot) -> LiveStatus {
+pub(crate) fn status_from_sab(slot: &SabSlot) -> LiveStatus {
     let pct = slot.percentage.trim().parse::<f64>().unwrap_or(0.0);
     LiveStatus {
         progress: (pct / 100.0).clamp(0.0, 1.0),

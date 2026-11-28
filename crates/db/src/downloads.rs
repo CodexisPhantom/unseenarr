@@ -9,6 +9,7 @@ use sea_orm::{
 };
 
 use crate::entities::{blocklist, download_clients, downloads, movies};
+use unseenarr_core::download::{DownloadState, transition};
 
 /// Terminal download states that no longer belong in the active queue.
 pub const FINAL_STATES: &[&str] = &["imported", "failed", "removed"];
@@ -187,6 +188,46 @@ pub async fn mark_removed(
     Ok(Some(existing))
 }
 
+/// Moves a download to `next` along the steps the state machine allows and
+/// records `error` with it. `Ok(None)` when the row is gone, is already in
+/// `next`, or the move is not allowed; otherwise the row before and after.
+pub async fn advance(
+    db: &DatabaseConnection,
+    id: i32,
+    next: DownloadState,
+    error: Option<String>,
+) -> Result<Option<(downloads::Model, downloads::Model)>, DbErr> {
+    let txn = db.begin().await?;
+    let Some(existing) = downloads::Entity::find_by_id(id).one(&txn).await? else {
+        return Ok(None);
+    };
+    let Some(current) = DownloadState::parse(&existing.state) else {
+        return Err(DbErr::Custom(format!(
+            "download {id} has an unreadable state"
+        )));
+    };
+    if current == next {
+        return Ok(None);
+    }
+    let Ok(path) = transition(current, next) else {
+        return Ok(None);
+    };
+    // One write is one step: a longer route has an intermediate state that
+    // has to be stored first.
+    if path.len() != 1 {
+        return Ok(None);
+    }
+    let mut active: downloads::ActiveModel = existing.clone().into();
+    active.state = Set(next.as_str().to_owned());
+    active.error = Set(error);
+    if path.contains(&DownloadState::Completed) && existing.completed_at.is_none() {
+        active.completed_at = Set(Some(crate::now()));
+    }
+    let after = active.update(&txn).await?;
+    txn.commit().await?;
+    Ok(Some((existing, after)))
+}
+
 /// Lists blocklist rows for a movie, newest first.
 pub async fn list_blocklist_for_movie(
     db: &DatabaseConnection,
@@ -317,5 +358,61 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn advance_follows_the_state_machine() {
+        use unseenarr_core::download::DownloadState as S;
+        let (db, _dir) = temp_db().await;
+        let movie_id = seed_movie(&db).await;
+        let download = create(
+            &db,
+            NewDownload {
+                movie_id,
+                movie_profile_id: None,
+                indexer_id: None,
+                download_client_id: None,
+                client_download_id: "hash-advance".into(),
+                release_title: "The.Matrix.1999.1080p.BluRay".into(),
+                quality_id: 7,
+                custom_format_score: 0,
+                size: 10_000_000_000,
+                state: "queued".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let (before, after) = advance(&db, download.id, S::Downloading, None)
+            .await
+            .unwrap()
+            .expect("queued -> downloading moves");
+        assert_eq!(before.state, "queued");
+        assert_eq!(after.state, "downloading");
+
+        // Downloading cannot jump straight to Imported.
+        assert!(
+            advance(&db, download.id, S::Imported, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            find(&db, download.id).await.unwrap().unwrap().state,
+            "downloading"
+        );
+
+        let (_, after) = advance(&db, download.id, S::Completed, None)
+            .await
+            .unwrap()
+            .expect("downloading -> completed moves");
+        assert!(after.completed_at.is_some());
+
+        let (_, after) = advance(&db, download.id, S::Importing, None)
+            .await
+            .unwrap()
+            .expect("completed -> importing moves");
+        assert_eq!(after.state, "importing");
+        assert!(after.completed_at.is_some());
     }
 }

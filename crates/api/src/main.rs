@@ -41,6 +41,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?
         .with_logs_dir(logs_dir);
     api::logs::prune_expired_on_startup(&state).await;
+    api::downloads::reconcile_on_startup(&state).await;
+    api::downloads::spawn(state.clone());
 
     let bind = std::env::var("UNSEENARR_BIND").unwrap_or("0.0.0.0:7979".into());
     let listener = tokio::net::TcpListener::bind(&bind).await?;

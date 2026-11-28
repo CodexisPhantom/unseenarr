@@ -9,6 +9,7 @@ mod collections;
 pub mod compat;
 mod custom_formats;
 mod download_clients;
+pub mod downloads;
 pub mod error;
 pub mod events;
 mod grab;
