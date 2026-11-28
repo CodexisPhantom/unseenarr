@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use arr_compat::prowlarr::{ProwlarrClient, ProwlarrError, feed_url};
 use arr_compat::radarr::client::RadarrClient;
 use arr_compat::radarr::dto::{
-    Field, MovieFileResource, MovieResource, MovieStatusType, Timestamp,
+    Field, MovieFileResource, MovieResource, MovieStatusType, QualityDefinitionResource, Timestamp,
 };
 use arr_compat::radarr::{RadarrError, map};
 use axum::Json;
@@ -18,7 +18,8 @@ use db::entities::import_sources::Model as Source;
 use db::import_sources as store;
 use db::movies::{Metadata, MovieError, NewFile, NewMovie, Patch};
 use db::{
-    collections, custom_formats, download_clients, indexers, movies, profiles, root_folders, tags,
+    collections, custom_formats, download_clients, indexers, movies, profiles, quality_definitions,
+    root_folders, tags,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -52,6 +53,9 @@ pub struct Report {
     pub indexers: Counts,
     pub download_clients: Counts,
     pub quality_definitions: Counts,
+    /// Titles of movies that already existed and were merged into. Empty when
+    /// the run created every movie.
+    pub merged_movies: Vec<String>,
     /// Short lines about what was renamed, left out or needs the user.
     pub notes: Vec<String>,
 }
@@ -308,6 +312,7 @@ struct Run<'a> {
     apply: bool,
     report: Report,
     synthetic: i32,
+    groups: Option<HashSet<String>>,
     /// Local root folders: id and path without trailing separator.
     roots: Vec<(i32, String)>,
     tag_ids: HashMap<i32, i32>,
@@ -324,6 +329,13 @@ impl Run<'_> {
             self.source.local_path.as_deref(),
             path,
         )
+    }
+
+    /// Whether the source asked for this group. No list means all of them.
+    fn wants(&self, group: &str) -> bool {
+        self.groups
+            .as_ref()
+            .is_none_or(|groups| groups.contains(group))
     }
 
     /// An id for something a preview would create.
@@ -777,6 +789,9 @@ impl Run<'_> {
                         continue;
                     }
                     self.report.movies.matched += 1;
+                    if !movie.title.trim().is_empty() {
+                        self.report.merged_movies.push(movie.title.clone());
+                    }
                     if self.apply {
                         self.merge(movie, &existing, profile_id, &incoming_tags, availability)
                             .await?;
@@ -957,6 +972,45 @@ impl Run<'_> {
             .iter()
             .find(|row| row.relative_path == new.relative_path)
             .map(|row| (row.id, row.size)))
+    }
+
+    /// Applies the source's global size limits to the rows it lists. A quality
+    /// the library does not have is skipped: the qualities are ours, not its.
+    async fn quality_definitions(
+        &mut self,
+        remote: &[QualityDefinitionResource],
+    ) -> Result<(), Problem> {
+        for definition in remote {
+            let id = definition.quality.id;
+            let Some(current) = quality_definitions::find(&self.state.db, id)
+                .await
+                .map_err(failed)?
+            else {
+                self.report.quality_definitions.skipped += 1;
+                continue;
+            };
+            let values = quality_definitions::Values {
+                title: non_empty(&definition.title).unwrap_or_else(|| current.title.clone()),
+                min_size: definition.min_size.unwrap_or(current.min_size),
+                preferred_size: definition.preferred_size,
+                max_size: definition.max_size,
+            };
+            if values.title == current.title
+                && values.min_size == current.min_size
+                && values.preferred_size == current.preferred_size
+                && values.max_size == current.max_size
+            {
+                self.report.quality_definitions.matched += 1;
+                continue;
+            }
+            if self.apply {
+                quality_definitions::update(&self.state.db, id, values)
+                    .await
+                    .map_err(failed)?;
+            }
+            self.report.quality_definitions.created += 1;
+        }
+        Ok(())
     }
 
     async fn indexers(
@@ -1246,6 +1300,27 @@ fn metadata(movie: &MovieResource) -> Metadata {
     }
 }
 
+/// The resource groups a source can be told to import, in report order.
+const GROUPS: [&str; 8] = [
+    "rootFolders",
+    "qualityProfiles",
+    "customFormats",
+    "tags",
+    "collections",
+    "movies",
+    "indexers",
+    "downloadClients",
+];
+
+/// The only group a Prowlarr source has.
+const PROWLARR_GROUPS: [&str; 1] = ["indexers"];
+
+/// The groups a source asked for, or `None` for all of them.
+fn groups_of(source: &Source) -> Option<HashSet<String>> {
+    let groups: HashSet<String> = serde_json::from_str(source.resources.as_deref()?).ok()?;
+    (!groups.is_empty()).then_some(groups)
+}
+
 /// Reads the source and merges it into the library. With `apply == false`
 /// nothing is written and the source is not marked as imported.
 pub async fn import(state: &AppState, source: &Source, apply: bool) -> Result<Report, Problem> {
@@ -1269,6 +1344,7 @@ async fn import_prowlarr(
         apply,
         report: Report::default(),
         synthetic: 0,
+        groups: None,
         roots: Vec::new(),
         tag_ids: HashMap::new(),
         format_ids: HashMap::new(),
@@ -1287,37 +1363,55 @@ async fn import_prowlarr(
 async fn import_radarr(state: &AppState, source: &Source, apply: bool) -> Result<Report, Problem> {
     let key = db::secret::decrypt(&state.secrets, &source.api_key).map_err(failed)?;
     let client = RadarrClient::new(state.http.clone(), &source.url, key.expose());
-    let root_folders = client.root_folders().await.map_err(radarr_failed)?;
-    let tags = client.tags().await.map_err(radarr_failed)?;
-    let custom_formats = client.custom_formats().await.map_err(radarr_failed)?;
-    let quality_profiles = client.quality_profiles().await.map_err(radarr_failed)?;
-    let collections = client.collections().await.map_err(radarr_failed)?;
-    let movies = client.movies().await.map_err(radarr_failed)?;
-    let indexers = client.indexers().await.map_err(radarr_failed)?;
-    let download_clients = client.download_clients().await.map_err(radarr_failed)?;
-    let definitions = client.quality_definitions().await;
-
     let mut run = Run {
         state,
         source,
         apply,
         report: Report::default(),
         synthetic: 0,
+        groups: groups_of(source),
         roots: Vec::new(),
         tag_ids: HashMap::new(),
         format_ids: HashMap::new(),
         profile_ids: HashMap::new(),
         collection_ids: HashMap::new(),
     };
-    run.root_folders(&root_folders).await?;
-    run.tags(&tags).await?;
-    run.custom_formats(&custom_formats).await?;
-    run.quality_profiles(&quality_profiles).await?;
-    run.collections(&collections).await?;
-    run.movies(&movies).await?;
-    run.indexers(&indexers).await?;
-    run.download_clients(&download_clients).await?;
-    match definitions {
+    if run.wants("rootFolders") {
+        let remote = client.root_folders().await.map_err(radarr_failed)?;
+        run.root_folders(&remote).await?;
+    }
+    if run.wants("tags") {
+        let remote = client.tags().await.map_err(radarr_failed)?;
+        run.tags(&remote).await?;
+    }
+    if run.wants("customFormats") {
+        let remote = client.custom_formats().await.map_err(radarr_failed)?;
+        run.custom_formats(&remote).await?;
+    }
+    if run.wants("qualityProfiles") {
+        let remote = client.quality_profiles().await.map_err(radarr_failed)?;
+        run.quality_profiles(&remote).await?;
+    }
+    if run.wants("collections") {
+        let remote = client.collections().await.map_err(radarr_failed)?;
+        run.collections(&remote).await?;
+    }
+    if run.wants("movies") {
+        let remote = client.movies().await.map_err(radarr_failed)?;
+        run.movies(&remote).await?;
+    }
+    if run.wants("indexers") {
+        let remote = client.indexers().await.map_err(radarr_failed)?;
+        run.indexers(&remote).await?;
+    }
+    if run.wants("downloadClients") {
+        let remote = client.download_clients().await.map_err(radarr_failed)?;
+        run.download_clients(&remote).await?;
+    }
+    match client.quality_definitions().await {
+        Ok(list) if source.import_quality_definitions && !list.is_empty() => {
+            run.quality_definitions(&list).await?;
+        }
         Ok(list) if !list.is_empty() => {
             run.report.quality_definitions.skipped = count(list.len());
             run.report
@@ -1349,12 +1443,19 @@ pub struct ImportSource {
     target_quality_profile_id: Option<i32>,
     remote_path: Option<String>,
     local_path: Option<String>,
+    /// The order the source is listed and run in; lower comes first.
+    position: i32,
+    /// The groups it imports. Every group when it imports all of them.
+    resources: Vec<String>,
+    /// The source's global size limits are applied by a run.
+    import_quality_definitions: bool,
     last_import_at: Option<String>,
     created_at: String,
 }
 
 impl From<Source> for ImportSource {
     fn from(row: Source) -> Self {
+        let prowlarr = row.kind == "prowlarr";
         Self {
             id: row.id,
             kind: row.kind,
@@ -1363,6 +1464,16 @@ impl From<Source> for ImportSource {
             target_quality_profile_id: row.target_quality_profile_id,
             remote_path: row.remote_path,
             local_path: row.local_path,
+            position: row.position,
+            resources: row
+                .resources
+                .as_deref()
+                .and_then(|text| serde_json::from_str(text).ok())
+                .unwrap_or_else(|| {
+                    let all: &[&str] = if prowlarr { &PROWLARR_GROUPS } else { &GROUPS };
+                    all.iter().map(|group| (*group).to_owned()).collect()
+                }),
+            import_quality_definitions: row.import_quality_definitions,
             last_import_at: row.last_import_at,
             created_at: row.created_at,
         }
@@ -1388,6 +1499,12 @@ pub struct NewSource {
     remote_path: Option<String>,
     /// The same prefix on this machine. Needs `remotePath`.
     local_path: Option<String>,
+    /// The resource groups to import. Empty means all of them.
+    #[serde(default)]
+    resources: Vec<String>,
+    /// Apply the source's quality definitions to the global size limits.
+    #[serde(default)]
+    import_quality_definitions: bool,
 }
 
 /// Checks a request before it reaches the database.
@@ -1417,6 +1534,22 @@ fn validate(body: &NewSource) -> Result<(), Problem> {
                 "is only used by a Radarr source",
             ));
         }
+        if body.import_quality_definitions {
+            return Err(Problem::validation(
+                "importQualityDefinitions",
+                "is only used by a Radarr source",
+            ));
+        }
+        if body
+            .resources
+            .iter()
+            .any(|group| !PROWLARR_GROUPS.contains(&group.as_str()))
+        {
+            return Err(Problem::validation(
+                "resources",
+                "a Prowlarr source only imports `indexers`",
+            ));
+        }
     }
     if body.name.trim().is_empty() {
         return Err(Problem::validation("name", "must not be blank"));
@@ -1429,6 +1562,35 @@ fn validate(body: &NewSource) -> Result<(), Problem> {
             "remotePath",
             "and localPath must be given together",
         ));
+    }
+    if let Some(unknown) = body
+        .resources
+        .iter()
+        .find(|group| !GROUPS.contains(&group.as_str()))
+    {
+        return Err(Problem::validation(
+            "resources",
+            &format!("`{unknown}` is not an import resource"),
+        ));
+    }
+    if body.resources.iter().any(|group| group == "movies") {
+        if !body.resources.iter().any(|group| group == "rootFolders") {
+            return Err(Problem::validation(
+                "resources",
+                "movies require root folders",
+            ));
+        }
+        if body.target_quality_profile_id.is_none()
+            && !body
+                .resources
+                .iter()
+                .any(|group| group == "qualityProfiles")
+        {
+            return Err(Problem::validation(
+                "resources",
+                "movies require quality profiles or a target quality profile",
+            ));
+        }
     }
     Ok(())
 }
@@ -1455,7 +1617,7 @@ async fn load(state: &AppState, id: i32) -> Result<Source, Problem> {
         .ok_or_else(Problem::not_found)
 }
 
-/// Lists the import sources by name.
+/// Lists the import sources in the order they run in.
 #[utoipa::path(
     get,
     path = "/api/v1/import-sources",
@@ -1500,11 +1662,113 @@ pub async fn create_source(
         target_quality_profile_id: body.target_quality_profile_id,
         remote_path: body.remote_path,
         local_path: body.local_path,
+        resources: (!body.resources.is_empty())
+            .then(|| serde_json::to_string(&body.resources).expect("a list of strings")),
+        import_quality_definitions: body.import_quality_definitions,
     };
     let row = store::create(&state.db, values)
         .await
         .map_err(source_error)?;
     Ok((StatusCode::CREATED, Json(row.into())))
+}
+
+/// What a source's URL and key reach. Nothing is stored.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Connection {
+    /// `Radarr` for a Radarr, `Sonarr` for a Sonarr.
+    pub app_name: String,
+    /// The instance name set in the source's settings.
+    pub instance_name: String,
+    pub version: String,
+}
+
+/// A source to try before it is saved. No `Debug`: it holds a key.
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TestSource {
+    pub url: String,
+    /// The source's API key. It is not stored.
+    #[schema(format = Password)]
+    pub api_key: String,
+}
+
+/// Tries a URL and key, so the page can say what they reach before saving.
+#[utoipa::path(
+    post,
+    path = "/api/v1/import-sources/test",
+    tag = "import-sources",
+    request_body = TestSource,
+    responses(
+        (status = 200, description = "What the URL and key reach", body = Connection),
+        (status = 403, description = "Permission denied", body = Problem),
+        (status = 422, description = "The request is not valid", body = Problem),
+        (status = 502, description = "The source did not answer", body = Problem),
+    )
+)]
+pub async fn test_source(
+    _caller: Require<ImportRun>,
+    State(state): State<AppState>,
+    Json(body): Json<TestSource>,
+) -> Result<Json<Connection>, Problem> {
+    if body.url.trim().is_empty() {
+        return Err(Problem::validation("url", "must not be blank"));
+    }
+    if body.api_key.trim().is_empty() {
+        return Err(Problem::validation("apiKey", "must not be blank"));
+    }
+    let status = RadarrClient::new(state.http.clone(), body.url.trim(), body.api_key.trim())
+        .system_status()
+        .await
+        .map_err(radarr_failed)?;
+    Ok(Json(Connection {
+        app_name: status.app_name,
+        instance_name: status.instance_name,
+        version: status.version,
+    }))
+}
+
+/// The order the sources are listed and run in, first to last.
+#[derive(Deserialize, ToSchema)]
+pub struct SourceOrder {
+    /// Every source id, once.
+    pub ids: Vec<i32>,
+}
+
+/// Sets the order the sources are listed in. The first one's profile is the
+/// primary profile of a movie both sources have.
+#[utoipa::path(
+    patch,
+    path = "/api/v1/import-sources/order",
+    tag = "import-sources",
+    request_body = SourceOrder,
+    responses(
+        (status = 204, description = "Reordered"),
+        (status = 403, description = "Permission denied", body = Problem),
+        (status = 422, description = "The request is not valid", body = Problem),
+    )
+)]
+pub async fn order_sources(
+    _caller: Require<ImportRun>,
+    State(state): State<AppState>,
+    Json(body): Json<SourceOrder>,
+) -> Result<StatusCode, Problem> {
+    let known = store::list(&state.db).await.map_err(failed)?;
+    let mut wanted = body.ids.clone();
+    wanted.sort_unstable();
+    wanted.dedup();
+    let mut existing: Vec<i32> = known.iter().map(|row| row.id).collect();
+    existing.sort_unstable();
+    if wanted != existing {
+        return Err(Problem::validation(
+            "ids",
+            "must list every import source once",
+        ));
+    }
+    store::reorder(&state.db, &body.ids)
+        .await
+        .map_err(source_error)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Deletes an import source and its resource map. Imported data stays.
@@ -1592,6 +1856,8 @@ mod tests {
             target_quality_profile_id: None,
             remote_path: None,
             local_path: None,
+            resources: Vec::new(),
+            import_quality_definitions: false,
         }
     }
 
@@ -1674,6 +1940,8 @@ mod tests {
             target_quality_profile_id: None,
             remote_path: None,
             local_path: None,
+            resources: Vec::new(),
+            import_quality_definitions: false,
         }
     }
 
@@ -1690,6 +1958,42 @@ mod tests {
         let mut b = prowlarr_body();
         b.remote_path = Some("/movies".to_owned());
         assert_eq!(field(&b).as_deref(), Some("remotePath"));
+    }
+
+    #[test]
+    fn a_prowlarr_source_imports_indexers_only() {
+        let mut b = prowlarr_body();
+        b.resources = vec!["indexers".to_owned()];
+        assert!(validate(&b).is_ok());
+        b.resources = vec!["indexers".to_owned(), "tags".to_owned()];
+        assert_eq!(field(&b).as_deref(), Some("resources"));
+        let mut b = prowlarr_body();
+        b.import_quality_definitions = true;
+        assert_eq!(field(&b).as_deref(), Some("importQualityDefinitions"));
+    }
+
+    #[test]
+    fn rejects_an_unknown_resource_group() {
+        let mut b = body();
+        b.resources = vec!["movies".to_owned(), "subtitles".to_owned()];
+        assert_eq!(field(&b).as_deref(), Some("resources"));
+        let mut b = body();
+        b.resources = vec!["rootFolders".to_owned(), "qualityProfiles".to_owned()];
+        assert!(validate(&b).is_ok());
+    }
+
+    #[test]
+    fn movie_imports_require_their_selected_dependencies() {
+        let mut b = body();
+        b.resources = vec!["movies".to_owned()];
+        assert_eq!(field(&b).as_deref(), Some("resources"));
+        b.resources = vec!["movies".to_owned(), "rootFolders".to_owned()];
+        assert_eq!(field(&b).as_deref(), Some("resources"));
+        b.target_quality_profile_id = Some(1);
+        assert!(validate(&b).is_ok());
+        b.resources.push("qualityProfiles".to_owned());
+        b.target_quality_profile_id = None;
+        assert!(validate(&b).is_ok());
     }
 
     #[test]

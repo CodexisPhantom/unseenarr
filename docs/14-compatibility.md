@@ -50,10 +50,18 @@ per torrent indexer and one Newznab indexer per usenet indexer, each at
 The original definition is not rebuilt: Prowlarr masks the indexer's key
 and Cardigann definitions sign in with a login Unseenarr does not model.
 Imported entries arrive enabled and are safe to re-run.
+A Prowlarr source has no quality definitions and imports the `indexers`
+group only; it is ordered and listed with the Radarr sources.
 
 Several instances: each import source has a target quality profile. All
 movies from that source get that profile, or keep their mapped profile if no
 target is set.
+
+The page is `/import/radarr`: the saved sources with their preview and re-run,
+the ↑/↓ order, a per-source list of resource groups, the quality-sizes switch
+and the report. `POST /import-sources/test` checks a connection without saving
+it, `POST /import-sources/{id}/preview` counts a run without writing, and
+`PATCH /import-sources/order` stores the source order.
 
 A movie present in two instances is merged by `tmdbId`, and nothing is lost:
 

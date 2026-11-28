@@ -311,7 +311,7 @@ fn all_created(report: &Value) -> Vec<(String, u64)> {
         .as_object()
         .unwrap()
         .iter()
-        .filter(|(name, _)| *name != "notes")
+        .filter(|(name, _)| *name != "notes" && *name != "mergedMovies")
         .map(|(name, counts)| (name.clone(), counts["created"].as_u64().unwrap()))
         .collect()
 }
@@ -480,6 +480,8 @@ async fn two_sources_merge_into_one_movie_with_two_profiles_and_two_files() {
     let report = import(&app, source_b, "run").await;
     assert_eq!(created(&report, "movies"), 0, "{report}");
     assert_eq!(report["movies"]["matched"], 1, "{report}");
+    let title = matrix(&uhd, "/movies-4k", "uhd.mkv", 5_000)["title"].clone();
+    assert_eq!(report["mergedMovies"], json!([title]), "{report}");
 
     let movies = db::movies::list(&app.state.db).await.unwrap();
     let matrix: Vec<_> = movies.iter().filter(|m| m.model.tmdb_id == 603).collect();
@@ -684,4 +686,250 @@ async fn a_prowlarr_preview_writes_nothing() {
             .is_empty()
     );
     assert_eq!(last_import_at(&app, id).await, None);
+}
+
+/// The sources in the order the list returns them.
+async fn source_names(app: &App) -> Vec<String> {
+    let (status, body) = app.owner(Method::GET, SOURCES, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body.as_array()
+        .unwrap()
+        .iter()
+        .map(|source| source["name"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn the_order_of_sources_can_be_changed() {
+    let (app, _tmdb) = app().await;
+    let (a, b) = (MockServer::start().await, MockServer::start().await);
+    let source_a = add_source(&app, "A", &a, None).await;
+    let source_b = add_source(&app, "B", &b, None).await;
+    assert_eq!(source_names(&app).await, ["A", "B"]);
+
+    let (status, body) = app
+        .owner(
+            Method::PATCH,
+            &format!("{SOURCES}/order"),
+            Some(json!({ "ids": [source_b, source_a] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(source_names(&app).await, ["B", "A"]);
+
+    let (status, body) = app
+        .owner(
+            Method::PATCH,
+            &format!("{SOURCES}/order"),
+            Some(json!({ "ids": [source_b] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(source_names(&app).await, ["B", "A"]);
+}
+
+#[tokio::test]
+async fn a_prowlarr_source_is_ordered_with_the_radarr_ones_and_imports_indexers_only() {
+    let (app, _tmdb) = app().await;
+    let (radarr, prowlarr) = (MockServer::start().await, MockServer::start().await);
+    let radarr_id = add_source(&app, "Radarr", &radarr, None).await;
+    let prowlarr_id = add_prowlarr_source(&app, "Prowlarr", &prowlarr).await;
+
+    let (status, body) = app.owner(Method::GET, SOURCES, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed = body.as_array().unwrap();
+    assert_eq!(listed[1]["kind"], "prowlarr", "{body}");
+    assert_eq!(
+        listed[1]["position"],
+        listed[0]["position"].as_i64().unwrap() + 1
+    );
+    assert_eq!(listed[1]["resources"], json!(["indexers"]), "{body}");
+    assert_eq!(listed[1]["importQualityDefinitions"], false, "{body}");
+    assert_eq!(
+        listed[0]["resources"].as_array().unwrap().len(),
+        8,
+        "{body}"
+    );
+
+    let (status, body) = app
+        .owner(
+            Method::PATCH,
+            &format!("{SOURCES}/order"),
+            Some(json!({ "ids": [prowlarr_id, radarr_id] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(source_names(&app).await, ["Prowlarr", "Radarr"]);
+
+    for extra in [
+        json!({"resources": ["indexers", "tags"]}),
+        json!({"importQualityDefinitions": true}),
+    ] {
+        let mut body = json!({"kind": "prowlarr", "name": "Other", "url": "http://prowlarr:9697", "apiKey": KEY});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let (status, body) = app.owner(Method::POST, SOURCES, Some(body)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    }
+}
+
+#[tokio::test]
+async fn a_source_imports_only_the_groups_it_lists() {
+    let (app, _tmdb) = app().await;
+    let radarr = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/rootfolder"))
+        .respond_with(json_body(ROOT_FOLDERS, 200))
+        .expect(1)
+        .mount(&radarr)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/qualitydefinition"))
+        .respond_with(json_body(DEFINITIONS, 200))
+        .expect(1)
+        .mount(&radarr)
+        .await;
+    let (status, source) = app
+        .owner(
+            Method::POST,
+            SOURCES,
+            Some(json!({
+                "kind": "radarr", "name": "Roots", "url": radarr.uri(), "apiKey": KEY,
+                "resources": ["rootFolders"],
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{source}");
+    assert_eq!(source["resources"], json!(["rootFolders"]));
+    assert_eq!(source["importQualityDefinitions"], json!(false));
+    let id = i32::try_from(source["id"].as_i64().unwrap()).unwrap();
+
+    let report = import(&app, id, "run").await;
+    assert!(created(&report, "rootFolders") > 0, "{report}");
+    assert_eq!(created(&report, "movies"), 0, "{report}");
+    assert_eq!(report["movies"]["skipped"], json!(0), "{report}");
+    assert_eq!(db::movies::list(&app.state.db).await.unwrap().len(), 0);
+    assert_eq!(created(&report, "qualityDefinitions"), 0, "{report}");
+}
+
+/// Adds a source with extra body fields.
+async fn add_source_extra(app: &App, name: &str, radarr: &MockServer, extra: Value) -> i32 {
+    let mut body = json!({
+        "kind": "radarr", "name": name, "url": radarr.uri(), "apiKey": KEY,
+    });
+    if let Value::Object(extra) = extra {
+        for (key, value) in extra {
+            body[key] = value;
+        }
+    }
+    let (status, source) = app.owner(Method::POST, SOURCES, Some(body)).await;
+    assert_eq!(status, StatusCode::CREATED, "{source}");
+    i32::try_from(source["id"].as_i64().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn quality_definitions_are_applied_only_when_asked() {
+    let (app, _tmdb) = app().await;
+    let mut definitions: Vec<Value> = serde_json::from_str(DEFINITIONS).unwrap();
+    let quality_id = i32::try_from(definitions[0]["quality"]["id"].as_i64().unwrap()).unwrap();
+    let before = db::quality_definitions::find(&app.state.db, quality_id)
+        .await
+        .unwrap()
+        .unwrap();
+    definitions[0]["maxSize"] = json!(123.5);
+    definitions[0]["minSize"] = json!(1.5);
+    let changed = json!(definitions);
+    let plain_server = MockServer::start().await;
+    Fake::new()
+        .with("qualitydefinition", changed.clone())
+        .mount(&plain_server, 1)
+        .await;
+    let applied_server = MockServer::start().await;
+    Fake::new()
+        .with("qualitydefinition", changed)
+        .mount(&applied_server, 1)
+        .await;
+
+    let plain = add_source(&app, "Plain", &plain_server, None).await;
+    let report = import(&app, plain, "run").await;
+    assert_eq!(created(&report, "qualityDefinitions"), 0, "{report}");
+    assert_eq!(
+        report["qualityDefinitions"]["skipped"],
+        json!(definitions.len()),
+        "{report}"
+    );
+    let row = db::quality_definitions::find(&app.state.db, quality_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row, before);
+
+    let applied = add_source_extra(
+        &app,
+        "Defs",
+        &applied_server,
+        json!({ "importQualityDefinitions": true }),
+    )
+    .await;
+    let report = import(&app, applied, "run").await;
+    assert!(created(&report, "qualityDefinitions") > 0, "{report}");
+    let row = db::quality_definitions::find(&app.state.db, quality_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.min_size, 1.5);
+    assert_eq!(row.max_size, Some(123.5));
+    assert_ne!(row, before);
+}
+
+const STATUS: &str = r#"{"appName":"Radarr","instanceName":"Docker","version":"5.2.6.8376"}"#;
+
+#[tokio::test]
+async fn a_connection_is_tested_without_being_saved() {
+    let (app, _tmdb) = app().await;
+    let radarr = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/system/status"))
+        .respond_with(json_body(STATUS, 200))
+        .expect(1)
+        .mount(&radarr)
+        .await;
+
+    let (status, body) = app
+        .owner(
+            Method::POST,
+            &format!("{SOURCES}/test"),
+            Some(json!({ "url": radarr.uri(), "apiKey": KEY })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["appName"], json!("Radarr"));
+    assert_eq!(body["instanceName"], json!("Docker"));
+    assert_eq!(body["version"], json!("5.2.6.8376"));
+    assert!(store::list(&app.state.db).await.unwrap().is_empty());
+
+    let rejecting = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/system/status"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&rejecting)
+        .await;
+    let (status, body) = app
+        .owner(
+            Method::POST,
+            &format!("{SOURCES}/test"),
+            Some(json!({ "url": rejecting.uri(), "apiKey": KEY })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+
+    let (status, body) = app
+        .owner(
+            Method::POST,
+            &format!("{SOURCES}/test"),
+            Some(json!({ "url": " ", "apiKey": KEY })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
 }

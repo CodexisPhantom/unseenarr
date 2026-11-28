@@ -27,7 +27,8 @@ impl MigratorTrait for Migrator {
             Box::new(M0016TvShows),
             Box::new(M0017History),
             Box::new(M0018ImportSources),
-            Box::new(M0019ProwlarrImportSources),
+            Box::new(M0019ImportSourceOrderAndOptions),
+            Box::new(M0020ProwlarrImportSources),
         ]
     }
 }
@@ -1075,18 +1076,48 @@ impl MigrationTrait for M0018ImportSources {
     }
 }
 
-struct M0019ProwlarrImportSources;
+struct M0019ImportSourceOrderAndOptions;
 
-impl MigrationName for M0019ProwlarrImportSources {
+impl MigrationName for M0019ImportSourceOrderAndOptions {
     fn name(&self) -> &str {
-        "m0019_prowlarr_import_sources"
+        "m0019_import_source_order_and_options"
+    }
+}
+
+/// The position orders the sources, `resources` is a JSON array of the
+/// groups to import (NULL means all), and `import_quality_definitions`
+/// applies the source's global size limits.
+const M0019_UP: &str = r#"
+ALTER TABLE import_sources ADD COLUMN position integer NOT NULL DEFAULT 0;
+ALTER TABLE import_sources ADD COLUMN resources text;
+ALTER TABLE import_sources ADD COLUMN import_quality_definitions integer NOT NULL DEFAULT 0;
+UPDATE import_sources SET position = id;
+"#;
+
+#[async_trait::async_trait]
+impl MigrationTrait for M0019ImportSourceOrderAndOptions {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(M0019_UP)
+            .await?;
+        Ok(())
+    }
+}
+
+struct M0020ProwlarrImportSources;
+
+impl MigrationName for M0020ProwlarrImportSources {
+    fn name(&self) -> &str {
+        "m0020_prowlarr_import_sources"
     }
 }
 
 /// Prowlarr is the second import source kind (docs/14-compatibility.md,
 /// section C). SQLite cannot widen a CHECK in place, so the table is rebuilt
-/// and its rows are copied; `import_map` keeps its foreign key by table name.
-const M0019_UP: &str = r#"
+/// and its rows are copied, including the columns m0019 added; `import_map`
+/// keeps its foreign key by table name.
+const M0020_UP: &str = r#"
 PRAGMA foreign_keys = OFF;
 BEGIN;
 
@@ -1102,12 +1133,17 @@ CREATE TABLE import_sources_new (
     last_import_at text,
     created_at text NOT NULL,
     updated_at text NOT NULL,
+    position integer NOT NULL DEFAULT 0,
+    resources text,
+    import_quality_definitions integer NOT NULL DEFAULT 0,
     CHECK ((remote_path IS NULL) = (local_path IS NULL))
 );
 INSERT INTO import_sources_new (id, kind, name, url, api_key, target_quality_profile_id,
-                                remote_path, local_path, last_import_at, created_at, updated_at)
+                                remote_path, local_path, last_import_at, created_at, updated_at,
+                                position, resources, import_quality_definitions)
 SELECT id, kind, name, url, api_key, target_quality_profile_id,
-       remote_path, local_path, last_import_at, created_at, updated_at
+       remote_path, local_path, last_import_at, created_at, updated_at,
+       position, resources, import_quality_definitions
 FROM import_sources;
 DROP TABLE import_sources;
 ALTER TABLE import_sources_new RENAME TO import_sources;
@@ -1117,11 +1153,11 @@ PRAGMA foreign_keys = ON;
 "#;
 
 #[async_trait::async_trait]
-impl MigrationTrait for M0019ProwlarrImportSources {
+impl MigrationTrait for M0020ProwlarrImportSources {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .get_connection()
-            .execute_unprepared(M0019_UP)
+            .execute_unprepared(M0020_UP)
             .await?;
         Ok(())
     }

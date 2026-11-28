@@ -436,4 +436,98 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn the_prowlarr_rebuild_keeps_import_source_order_options_and_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open(dir.path()).await.unwrap();
+        migration::Migrator::up(&db, Some(19)).await.unwrap();
+        let backend = db.get_database_backend();
+        db.execute_raw(Statement::from_string(
+            backend,
+            "INSERT INTO import_sources (id, kind, name, url, api_key, remote_path, local_path, position, resources, import_quality_definitions, created_at, updated_at)              VALUES (1, 'radarr', 'Main', 'http://radarr:7878', 'k', '/movies', '/data/movies', 7, '[\"rootFolders\",\"tags\"]', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');              INSERT INTO import_sources (id, kind, name, url, api_key, position, created_at, updated_at)              VALUES (2, 'radarr', 'Other', 'http://radarr:7879', 'k', 3, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');              INSERT INTO import_map (source_id, resource, source_resource_id, local_id) VALUES (1, 'tag', 5, 9);"
+                .to_owned(),
+        ))
+        .await
+        .unwrap();
+        db.close().await.unwrap();
+
+        let db = connect(dir.path()).await.unwrap();
+        let backend = db.get_database_backend();
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                backend,
+                "SELECT id, kind, remote_path, local_path, position, resources, import_quality_definitions                  FROM import_sources ORDER BY id",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        let first = &rows[0];
+        assert_eq!(first.try_get::<String>("", "kind").unwrap(), "radarr");
+        assert_eq!(first.try_get::<i32>("", "position").unwrap(), 7);
+        assert_eq!(
+            first
+                .try_get::<Option<String>>("", "resources")
+                .unwrap()
+                .as_deref(),
+            Some("[\"rootFolders\",\"tags\"]")
+        );
+        assert_eq!(
+            first
+                .try_get::<i32>("", "import_quality_definitions")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            first
+                .try_get::<Option<String>>("", "remote_path")
+                .unwrap()
+                .as_deref(),
+            Some("/movies")
+        );
+        let second = &rows[1];
+        assert_eq!(second.try_get::<i32>("", "position").unwrap(), 3);
+        assert!(
+            second
+                .try_get::<Option<String>>("", "resources")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            second
+                .try_get::<i32>("", "import_quality_definitions")
+                .unwrap(),
+            0
+        );
+
+        db.execute_raw(Statement::from_string(
+            backend,
+            "INSERT INTO import_sources (kind, name, url, api_key, created_at, updated_at)              VALUES ('prowlarr', 'Prowlarr', 'http://prowlarr:9696', 'k', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')"
+                .to_owned(),
+        ))
+        .await
+        .unwrap();
+        let violations = db
+            .query_all_raw(Statement::from_string(backend, "PRAGMA foreign_key_check"))
+            .await
+            .unwrap();
+        assert!(violations.is_empty());
+        let mapped = |db: DatabaseConnection| async move {
+            db.query_all_raw(Statement::from_string(
+                db.get_database_backend(),
+                "SELECT 1 FROM import_map WHERE source_id = 1",
+            ))
+            .await
+            .unwrap()
+            .len()
+        };
+        assert_eq!(mapped(db.clone()).await, 1);
+        db.execute_raw(Statement::from_string(
+            backend,
+            "DELETE FROM import_sources WHERE id = 1".to_owned(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(mapped(db).await, 0);
+    }
 }

@@ -6,7 +6,7 @@
 use crate::entities::{import_map, import_sources};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder,
-    Set, SqlErr, sea_query::OnConflict,
+    Set, SqlErr, TransactionTrait, sea_query::OnConflict,
 };
 use std::collections::HashMap;
 /// The resources an import maps. The value is stored in `import_map.resource`.
@@ -33,6 +33,9 @@ pub struct Values {
     /// The path prefix as the source sees it, and its local replacement.
     pub remote_path: Option<String>,
     pub local_path: Option<String>,
+    /// The resource groups to import, as a JSON array, or `None` for all.
+    pub resources: Option<String>,
+    pub import_quality_definitions: bool,
 }
 
 #[derive(Debug)]
@@ -55,10 +58,11 @@ impl From<DbErr> for SourceError {
     }
 }
 
-/// Every source, by name.
+/// Every source, by position then id.
 pub async fn list(db: &DatabaseConnection) -> Result<Vec<import_sources::Model>, DbErr> {
     import_sources::Entity::find()
-        .order_by_asc(import_sources::Column::Name)
+        .order_by_asc(import_sources::Column::Position)
+        .order_by_asc(import_sources::Column::Id)
         .all(db)
         .await
 }
@@ -75,6 +79,13 @@ pub async fn create(
     values: Values,
 ) -> Result<import_sources::Model, SourceError> {
     let now = crate::now();
+    let position = import_sources::Entity::find()
+        .order_by_desc(import_sources::Column::Position)
+        .one(db)
+        .await
+        .map_err(SourceError::from)?
+        .map(|row| row.position + 1)
+        .unwrap_or(0);
     Ok(import_sources::ActiveModel {
         kind: Set(values.kind),
         name: Set(values.name),
@@ -83,6 +94,9 @@ pub async fn create(
         target_quality_profile_id: Set(values.target_quality_profile_id),
         remote_path: Set(values.remote_path),
         local_path: Set(values.local_path),
+        position: Set(position),
+        resources: Set(values.resources),
+        import_quality_definitions: Set(values.import_quality_definitions),
         last_import_at: Set(None),
         created_at: Set(now.clone()),
         updated_at: Set(now),
@@ -101,6 +115,33 @@ pub async fn delete(db: &DatabaseConnection, id: i32) -> Result<(), SourceError>
     {
         return Err(SourceError::NotFound);
     }
+    Ok(())
+}
+
+/// Sets each source's position to its index in `ids`.
+pub async fn reorder(db: &DatabaseConnection, ids: &[i32]) -> Result<(), SourceError> {
+    let txn = db.begin().await?;
+    let known = import_sources::Entity::find().all(&txn).await?;
+    let mut wanted_ids = ids.to_vec();
+    wanted_ids.sort_unstable();
+    wanted_ids.dedup();
+    let mut known_ids: Vec<_> = known.iter().map(|source| source.id).collect();
+    known_ids.sort_unstable();
+    if wanted_ids != known_ids || ids.len() > i32::MAX as usize {
+        return Err(SourceError::NotFound);
+    }
+    let by_id: HashMap<_, _> = known
+        .into_iter()
+        .map(|source| (source.id, source))
+        .collect();
+    for (index, id) in ids.iter().enumerate() {
+        let current = by_id.get(id).ok_or(SourceError::NotFound)?.clone();
+        let mut row: import_sources::ActiveModel = current.into();
+        row.position = Set(index as i32);
+        row.updated_at = Set(crate::now());
+        row.update(&txn).await?;
+    }
+    txn.commit().await?;
     Ok(())
 }
 
@@ -192,20 +233,46 @@ mod tests {
             target_quality_profile_id: None,
             remote_path: None,
             local_path: None,
+            resources: None,
+            import_quality_definitions: false,
         }
     }
 
     #[tokio::test]
     async fn creates_lists_and_deletes_a_source() {
         let (db, _dir) = temp_db().await;
-        let created = create(&db, values("http://radarr:7878")).await.unwrap();
-        assert_eq!(created.kind, "radarr");
-        assert_eq!(list(&db).await.unwrap().len(), 1);
-        assert_eq!(find(&db, created.id).await.unwrap().unwrap().id, created.id);
-        delete(&db, created.id).await.unwrap();
+        let first = create(&db, values("http://radarr:7878")).await.unwrap();
+        let second = create(&db, values("http://radarr:7879")).await.unwrap();
+        assert_eq!(first.kind, "radarr");
+        assert_eq!(second.position, first.position + 1);
+        let listed = list(&db).await.unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].id, first.id);
+        assert_eq!(listed[1].id, second.id);
+        assert_eq!(find(&db, first.id).await.unwrap().unwrap().id, first.id);
+        reorder(&db, &[second.id, first.id]).await.unwrap();
+        let listed = list(&db).await.unwrap();
+        assert_eq!(listed[0].id, second.id);
+        assert_eq!(listed[1].id, first.id);
+        let positions: Vec<_> = listed.iter().map(|source| source.position).collect();
+        assert!(matches!(
+            reorder(&db, &[first.id, 999_999]).await,
+            Err(SourceError::NotFound)
+        ));
+        assert_eq!(
+            list(&db)
+                .await
+                .unwrap()
+                .iter()
+                .map(|source| source.position)
+                .collect::<Vec<_>>(),
+            positions
+        );
+        delete(&db, first.id).await.unwrap();
+        delete(&db, second.id).await.unwrap();
         assert!(list(&db).await.unwrap().is_empty());
         assert!(matches!(
-            delete(&db, created.id).await,
+            delete(&db, first.id).await,
             Err(SourceError::NotFound)
         ));
     }

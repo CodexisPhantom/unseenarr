@@ -366,11 +366,48 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Lists the import sources by name. */
+        /** Lists the import sources in the order they run in. */
         get: operations["list_sources"];
         put?: never;
         /** Adds an import source. The key is stored encrypted. */
         post: operations["create_source"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/import-sources/order": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Sets the order the sources are listed in. The first one's profile is the
+         *     primary profile of a movie both sources have.
+         */
+        patch: operations["order_sources"];
+        trace?: never;
+    };
+    "/api/v1/import-sources/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Tries a URL and key, so the page can say what they reach before saving. */
+        post: operations["test_source"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1550,6 +1587,14 @@ export interface components {
             /** Format: int32 */
             rootFolderId?: number | null;
         };
+        /** @description What a source's URL and key reach. Nothing is stored. */
+        Connection: {
+            /** @description `Radarr` for a Radarr, `Sonarr` for a Sonarr. */
+            appName: string;
+            /** @description The instance name set in the source's settings. */
+            instanceName: string;
+            version: string;
+        };
         /** @description How many source resources of one kind were created, found or left out. */
         Counts: {
             /** Format: int32 */
@@ -1704,11 +1749,20 @@ export interface components {
             createdAt: string;
             /** Format: int32 */
             id: number;
+            /** @description The source's global size limits are applied by a run. */
+            importQualityDefinitions: boolean;
             kind: string;
             lastImportAt?: string | null;
             localPath?: string | null;
             name: string;
+            /**
+             * Format: int32
+             * @description The order the source is listed and run in; lower comes first.
+             */
+            position: number;
             remotePath?: string | null;
+            /** @description The groups it imports. Every group when it imports all of them. */
+            resources: string[];
             /** Format: int32 */
             targetQualityProfileId?: number | null;
             url: string;
@@ -2205,6 +2259,8 @@ export interface components {
              * @description The source's API key. It is stored encrypted and never returned.
              */
             apiKey: string;
+            /** @description Apply the source's quality definitions to the global size limits. */
+            importQualityDefinitions?: boolean;
             /** @description The kind of source: `radarr` or `prowlarr`. */
             kind: string;
             /** @description The same prefix on this machine. Needs `remotePath`. */
@@ -2212,6 +2268,8 @@ export interface components {
             name: string;
             /** @description A path prefix as the source sees it. Needs `localPath`. */
             remotePath?: string | null;
+            /** @description The resource groups to import. Empty means all of them. */
+            resources?: string[];
             /**
              * Format: int32
              * @description Quality profile given to every movie imported from this source. When
@@ -2561,6 +2619,11 @@ export interface components {
             customFormats: components["schemas"]["Counts"];
             downloadClients: components["schemas"]["Counts"];
             indexers: components["schemas"]["Counts"];
+            /**
+             * @description Titles of movies that already existed and were merged into. Empty when
+             *     the run created every movie.
+             */
+            mergedMovies: string[];
             movies: components["schemas"]["Counts"];
             /** @description Short lines about what was renamed, left out or needs the user. */
             notes: string[];
@@ -2687,6 +2750,11 @@ export interface components {
             id: string;
             name: string;
         };
+        /** @description The order the sources are listed and run in, first to last. */
+        SourceOrder: {
+            /** @description Every source id, once. */
+            ids: number[];
+        };
         /**
          * @description One field of a custom format specification. Preserves extra Radarr metadata
          *     fields so imported formats round-trip unchanged.
@@ -2748,6 +2816,15 @@ export interface components {
         TestResult: {
             /** @description The client version, for example `v4.6.2` or `4.3.2`. */
             version: string;
+        };
+        /** @description A source to try before it is saved. No `Debug`: it holds a key. */
+        TestSource: {
+            /**
+             * Format: password
+             * @description The source's API key. It is not stored.
+             */
+            apiKey: string;
+            url: string;
         };
         TmdbSettings: {
             /** @description A key is stored but cannot be decrypted: enter it again. */
@@ -3954,6 +4031,97 @@ export interface operations {
             };
             /** @description The request is not valid */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    order_sources: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourceOrder"];
+            };
+        };
+        responses: {
+            /** @description Reordered */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Permission denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request is not valid */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    test_source: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TestSource"];
+            };
+        };
+        responses: {
+            /** @description What the URL and key reach */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Connection"];
+                };
+            };
+            /** @description Permission denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request is not valid */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The source did not answer */
+            502: {
                 headers: {
                     [name: string]: unknown;
                 };
