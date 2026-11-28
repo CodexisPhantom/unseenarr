@@ -61,6 +61,7 @@
 	let report = $state<Report | null>(null);
 	let reportName = $state('');
 	let previewed = $state<number | null>(null);
+	let importMode = $state<'preview' | 'run' | null>(null);
 	let removing = $state<{ id: number; name: string } | null>(null);
 
 	// The first profile is the target once the switch turns on.
@@ -174,16 +175,37 @@
 					void queryClient.invalidateQueries({ queryKey: [key] });
 				}
 			}
+			importMode = null;
 		},
-		onError: (error) => (failure = error.message)
+		onError: (error) => {
+			failure = error.message;
+			importMode = null;
+		}
 	}));
 
 	function order(ids: number[], from: number, to: number) {
 		reorder.mutate(moveItem(ids, from, to));
 	}
 
+	function requestImport(id: number, run: boolean) {
+		importMode = run ? 'run' : 'preview';
+		importer.mutate({ id, run });
+	}
+
 	function toggleResource(group: ResourceGroup, on: boolean) {
-		resources = on ? [...resources, group] : resources.filter((value) => value !== group);
+		if (on) {
+			const next: ResourceGroup[] = [...resources, group];
+			if (group === 'movies') {
+				next.push('rootFolders');
+				if (!useTarget) next.push('qualityProfiles');
+			}
+			resources = [...new Set(next)];
+			return;
+		}
+		resources = resources.filter((value) =>
+			value !== group &&
+			!(value === 'movies' && (group === 'rootFolders' || (group === 'qualityProfiles' && !useTarget)))
+		);
 	}
 
 	function chosen(group: ResourceGroup) {
@@ -217,6 +239,11 @@
 	{/if}
 	{#if failure}
 		<p role="alert" class="mt-4 text-sm text-destructive">{failure}</p>
+	{/if}
+	{#if importer.isPending}
+		<p role="status" aria-live="polite" class="mt-4 text-sm text-muted-foreground">
+			{importMode === 'run' ? 'Import in progress…' : 'Counting changes…'}
+		</p>
 	{/if}
 
 	<h2 class="mt-8 font-semibold">Sources</h2>
@@ -281,7 +308,7 @@
 									variant="outline"
 									size="sm"
 									disabled={importer.isPending}
-									onclick={() => importer.mutate({ id: source.id, run: false })}
+									onclick={() => requestImport(source.id, false)}
 								>
 									Preview
 								</Button>
@@ -289,7 +316,7 @@
 									size="sm"
 									disabled={importer.isPending || previewed !== source.id}
 									title={previewed === source.id ? '' : 'Preview this source first.'}
-									onclick={() => importer.mutate({ id: source.id, run: true })}
+									onclick={() => requestImport(source.id, true)}
 								>
 									Import
 								</Button>
@@ -373,11 +400,18 @@
 			</div>
 			<div class="grid content-start gap-2 sm:col-span-2">
 				<Label>Resources</Label>
+				<p class="text-xs text-muted-foreground">
+					Movies need root folders and, unless you choose one target profile, quality profiles.
+				</p>
 				<div class="grid gap-2 sm:grid-cols-2">
 					{#each resourceGroups as group (group.value)}
 						<Label class="gap-2 font-normal">
 							<Checkbox
 								checked={chosen(group.value)}
+								disabled={
+									(group.value === 'rootFolders' && chosen('movies')) ||
+									(group.value === 'qualityProfiles' && chosen('movies') && !useTarget)
+								}
 								onCheckedChange={(on) => toggleResource(group.value, on === true)}
 							/>
 							{group.label}
@@ -402,6 +436,7 @@
 				disabled={name.trim() === '' ||
 					url.trim() === '' ||
 					apiKey.trim() === '' ||
+					(useTarget && target === null) ||
 					resources.length === 0 ||
 					create.isPending}
 				onclick={() => create.mutate()}
@@ -471,10 +506,9 @@
 				<div class="mt-4 flex items-center gap-2">
 					<Button
 						disabled={importer.isPending}
-						onclick={() =>
-							previewed !== null && importer.mutate({ id: previewed, run: true })}
+						onclick={() => previewed !== null && requestImport(previewed, true)}
 					>
-						{importer.isPending ? 'Importing…' : `Import ${sum.created} now`}
+						{importer.isPending ? 'Importing…' : 'Run import'}
 					</Button>
 					<span class="text-xs text-muted-foreground">
 						Nothing has been written yet.
@@ -489,8 +523,8 @@
 			<AlertDialog.Header>
 				<AlertDialog.Title>Remove this source?</AlertDialog.Title>
 				<AlertDialog.Description>
-					Unseenarr forgets the import map of {removing?.name}. The library it imported and the
-					source itself stay.
+					Unseenarr removes {removing?.name} and its import map. The movies and other library items
+					it imported stay.
 				</AlertDialog.Description>
 			</AlertDialog.Header>
 			<AlertDialog.Footer>

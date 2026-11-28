@@ -6,7 +6,7 @@
 use crate::entities::{import_map, import_sources};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder,
-    Set, SqlErr, sea_query::OnConflict,
+    Set, SqlErr, TransactionTrait, sea_query::OnConflict,
 };
 use std::collections::HashMap;
 /// The resources an import maps. The value is stored in `import_map.resource`.
@@ -120,15 +120,28 @@ pub async fn delete(db: &DatabaseConnection, id: i32) -> Result<(), SourceError>
 
 /// Sets each source's position to its index in `ids`.
 pub async fn reorder(db: &DatabaseConnection, ids: &[i32]) -> Result<(), SourceError> {
-    for (index, id) in ids.iter().enumerate() {
-        let Some(current) = import_sources::Entity::find_by_id(*id).one(db).await? else {
-            return Err(SourceError::NotFound);
-        };
-        let mut row: import_sources::ActiveModel = current.into();
-        row.position = Set(i32::try_from(index).unwrap_or(i32::MAX));
-        row.updated_at = Set(crate::now());
-        row.update(db).await?;
+    let txn = db.begin().await?;
+    let known = import_sources::Entity::find().all(&txn).await?;
+    let mut wanted_ids = ids.to_vec();
+    wanted_ids.sort_unstable();
+    wanted_ids.dedup();
+    let mut known_ids: Vec<_> = known.iter().map(|source| source.id).collect();
+    known_ids.sort_unstable();
+    if wanted_ids != known_ids || ids.len() > i32::MAX as usize {
+        return Err(SourceError::NotFound);
     }
+    let by_id: HashMap<_, _> = known
+        .into_iter()
+        .map(|source| (source.id, source))
+        .collect();
+    for (index, id) in ids.iter().enumerate() {
+        let current = by_id.get(id).ok_or(SourceError::NotFound)?.clone();
+        let mut row: import_sources::ActiveModel = current.into();
+        row.position = Set(index as i32);
+        row.updated_at = Set(crate::now());
+        row.update(&txn).await?;
+    }
+    txn.commit().await?;
     Ok(())
 }
 
@@ -241,10 +254,20 @@ mod tests {
         let listed = list(&db).await.unwrap();
         assert_eq!(listed[0].id, second.id);
         assert_eq!(listed[1].id, first.id);
+        let positions: Vec<_> = listed.iter().map(|source| source.position).collect();
         assert!(matches!(
             reorder(&db, &[first.id, 999_999]).await,
             Err(SourceError::NotFound)
         ));
+        assert_eq!(
+            list(&db)
+                .await
+                .unwrap()
+                .iter()
+                .map(|source| source.position)
+                .collect::<Vec<_>>(),
+            positions
+        );
         delete(&db, first.id).await.unwrap();
         delete(&db, second.id).await.unwrap();
         assert!(list(&db).await.unwrap().is_empty());

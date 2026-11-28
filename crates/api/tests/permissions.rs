@@ -433,6 +433,16 @@ fn app_router_passes_route_coverage() {
                 Permission::ImportRun
             ),
             profiles(
+                Method::PATCH,
+                "/api/v1/import-sources/order",
+                Permission::ImportRun
+            ),
+            profiles(
+                Method::POST,
+                "/api/v1/import-sources/test",
+                Permission::ImportRun
+            ),
+            profiles(
                 Method::DELETE,
                 "/api/v1/import-sources/{id}",
                 Permission::ImportRun

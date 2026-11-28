@@ -1376,6 +1376,25 @@ fn validate(body: &NewSource) -> Result<(), Problem> {
             &format!("`{unknown}` is not an import resource"),
         ));
     }
+    if body.resources.iter().any(|group| group == "movies") {
+        if !body.resources.iter().any(|group| group == "rootFolders") {
+            return Err(Problem::validation(
+                "resources",
+                "movies require root folders",
+            ));
+        }
+        if body.target_quality_profile_id.is_none()
+            && !body
+                .resources
+                .iter()
+                .any(|group| group == "qualityProfiles")
+        {
+            return Err(Problem::validation(
+                "resources",
+                "movies require quality profiles or a target quality profile",
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1714,6 +1733,20 @@ mod tests {
         assert_eq!(field(&b).as_deref(), Some("resources"));
         let mut b = body();
         b.resources = vec!["rootFolders".to_owned(), "qualityProfiles".to_owned()];
+        assert!(validate(&b).is_ok());
+    }
+
+    #[test]
+    fn movie_imports_require_their_selected_dependencies() {
+        let mut b = body();
+        b.resources = vec!["movies".to_owned()];
+        assert_eq!(field(&b).as_deref(), Some("resources"));
+        b.resources = vec!["movies".to_owned(), "rootFolders".to_owned()];
+        assert_eq!(field(&b).as_deref(), Some("resources"));
+        b.target_quality_profile_id = Some(1);
+        assert!(validate(&b).is_ok());
+        b.resources.push("qualityProfiles".to_owned());
+        b.target_quality_profile_id = None;
         assert!(validate(&b).is_ok());
     }
 
