@@ -1356,6 +1356,19 @@ async fn episode_monitor_updates_dedupes_and_rejects_unknown_ids() {
     assert_eq!(episodes.len(), 2);
     assert!(episodes.iter().all(|episode| !episode.monitored));
 
+    let repeated = app
+        .send(
+            req(Method::PUT, "/sonarr/api/v3/episode/monitor")
+                .header("X-Api-Key", &key)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "episodeIds": [first, second], "monitored": false }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(repeated.status, StatusCode::OK, "{}", repeated.body);
+
     let missing = app
         .send(
             req(Method::PUT, "/sonarr/api/v3/episode/monitor")

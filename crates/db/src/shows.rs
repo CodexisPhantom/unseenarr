@@ -182,6 +182,24 @@ pub async fn set_episode_monitored(
     Ok(Some(episode.update(db).await?))
 }
 
+/// Sets the monitored flag of every episode in one statement.
+pub async fn set_episodes_monitored(
+    db: &DatabaseConnection,
+    ids: &[i32],
+    monitored: bool,
+) -> Result<(), DbErr> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    episodes::Entity::update_many()
+        .col_expr(episodes::Column::Monitored, monitored.into())
+        .filter(episodes::Column::Id.is_in(ids.iter().copied()))
+        .exec(db)
+        .await?
+        ;
+    Ok(())
+}
+
 /// Every file of a show, by path.
 pub async fn files_of(
     db: &DatabaseConnection,

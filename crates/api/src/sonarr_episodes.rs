@@ -251,10 +251,10 @@ pub async fn monitor_episodes(
         .await?;
     }
     let actor = Actor::of(&state, &caller).await;
+    db::shows::set_episodes_monitored(&state.db, &ids, monitor.monitored)
+        .await
+        .map_err(db_failed)?;
     for id in ids {
-        db::shows::set_episode_monitored(&state.db, id, monitor.monitored)
-            .await
-            .map_err(db_failed)?;
         let event = Event::new("episode.monitored")
             .target("episode", id)
             .data(serde_json::json!({ "monitored": monitor.monitored }));
