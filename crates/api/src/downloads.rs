@@ -235,6 +235,7 @@ async fn observe(
                         let observation = match live.state {
                             Some("paused") => Observation::Present {
                                 progress: live.progress,
+                                queued: false,
                                 paused: true,
                                 complete: false,
                                 speed: 0,
@@ -243,6 +244,7 @@ async fn observe(
                             },
                             Some("completed") => Observation::Present {
                                 progress: 1.0,
+                                queued: false,
                                 paused: false,
                                 complete: true,
                                 speed: 0,
@@ -251,6 +253,7 @@ async fn observe(
                             },
                             Some("queued") => Observation::Present {
                                 progress: live.progress,
+                                queued: true,
                                 paused: false,
                                 complete: false,
                                 speed: 0,
@@ -259,6 +262,7 @@ async fn observe(
                             },
                             Some("downloading") => Observation::Present {
                                 progress: live.progress,
+                                queued: false,
                                 paused: false,
                                 complete: false,
                                 speed: live.speed,
@@ -267,6 +271,7 @@ async fn observe(
                             },
                             _ => Observation::Present {
                                 progress: live.progress,
+                                queued: false,
                                 paused: false,
                                 complete: false,
                                 speed: live.speed,
@@ -297,6 +302,7 @@ async fn observe(
                     let observation = match live.state {
                         Some("paused") => Observation::Present {
                             progress: live.progress,
+                            queued: false,
                             paused: true,
                             complete: false,
                             speed: 0,
@@ -305,6 +311,7 @@ async fn observe(
                         },
                         _ => Observation::Present {
                             progress: live.progress,
+                            queued: live.state == Some("queued"),
                             paused: false,
                             complete: false,
                             speed: 0,
@@ -335,6 +342,7 @@ async fn observe(
                     let observation = match item.status.as_str() {
                         "Completed" => Observation::Present {
                             progress: 1.0,
+                            queued: false,
                             paused: false,
                             complete: true,
                             speed: 0,
@@ -345,6 +353,7 @@ async fn observe(
                             let reason = item.fail_message.trim();
                             Observation::Present {
                                 progress: 0.0,
+                                queued: false,
                                 paused: false,
                                 complete: false,
                                 speed: 0,

@@ -155,6 +155,7 @@ pub enum Observation {
     /// The client has the item.
     Present {
         progress: f64,
+        queued: bool,
         paused: bool,
         complete: bool,
         speed: i64,
@@ -287,6 +288,7 @@ pub fn poll(
         }
         Observation::Present {
             progress,
+            queued,
             paused,
             complete,
             speed,
@@ -300,6 +302,8 @@ pub fn poll(
                 DownloadState::Completed
             } else if *paused {
                 DownloadState::Paused
+            } else if *queued {
+                DownloadState::Queued
             } else {
                 DownloadState::Downloading
             };
@@ -373,6 +377,7 @@ mod tests {
     fn present(progress: f64) -> Observation {
         Observation::Present {
             progress,
+            queued: false,
             paused: false,
             complete: false,
             speed: 100,
@@ -466,9 +471,32 @@ mod tests {
     }
 
     #[test]
+    fn queued_client_item_stays_queued() {
+        let observation = Observation::Present {
+            progress: 0.0,
+            queued: true,
+            paused: false,
+            complete: false,
+            speed: 0,
+            eta: None,
+            error: None,
+        };
+        let decision = poll(
+            DownloadState::Queued,
+            &Tracking::new(0.0, 0),
+            &observation,
+            settings(),
+            10,
+        );
+
+        assert_eq!(decision.state, DownloadState::Queued);
+    }
+
+    #[test]
     fn a_complete_observation_steps_one_edge() {
         let done = Observation::Present {
             progress: 1.0,
+            queued: false,
             paused: false,
             complete: true,
             speed: 0,
@@ -570,6 +598,7 @@ mod tests {
         // A paused observation targets Paused, where the stall check runs.
         let paused = Observation::Present {
             progress: 0.4,
+            queued: false,
             paused: true,
             complete: false,
             speed: 0,
@@ -602,6 +631,7 @@ mod tests {
     fn complete_reports_completed_and_client_error_fails() {
         let done = Observation::Present {
             progress: 1.0,
+            queued: false,
             paused: false,
             complete: true,
             speed: 0,
@@ -619,6 +649,7 @@ mod tests {
 
         let broken = Observation::Present {
             progress: 0.4,
+            queued: false,
             paused: false,
             complete: false,
             speed: 0,
