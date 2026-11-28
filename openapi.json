@@ -1382,7 +1382,7 @@
         "tags": [
           "import-sources"
         ],
-        "summary": "Lists the import sources by name.",
+        "summary": "Lists the import sources in the order they run in.",
         "operationId": "list_sources",
         "responses": {
           "200": {
@@ -1460,6 +1460,113 @@
           },
           "422": {
             "description": "The request is not valid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-permission": "import:run"
+      }
+    },
+    "/api/v1/import-sources/order": {
+      "patch": {
+        "tags": [
+          "import-sources"
+        ],
+        "summary": "Sets the order the sources are listed in. The first one's profile is the\nprimary profile of a movie both sources have.",
+        "operationId": "order_sources",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceOrder"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Reordered"
+          },
+          "403": {
+            "description": "Permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The request is not valid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-permission": "import:run"
+      }
+    },
+    "/api/v1/import-sources/test": {
+      "post": {
+        "tags": [
+          "import-sources"
+        ],
+        "summary": "Tries a URL and key, so the page can say what they reach before saving.",
+        "operationId": "test_source",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestSource"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "What the URL and key reach",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Connection"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The request is not valid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The source did not answer",
             "content": {
               "application/json": {
                 "schema": {
@@ -3871,8 +3978,8 @@
             }
           }
         },
-        "x-owner-only": true,
-        "x-permission": "authenticated"
+        "x-permission": "authenticated",
+        "x-owner-only": true
       }
     },
     "/api/v1/permissions": {
@@ -6493,6 +6600,28 @@
           }
         }
       },
+      "Connection": {
+        "type": "object",
+        "description": "What a source's URL and key reach. Nothing is stored.",
+        "required": [
+          "appName",
+          "instanceName",
+          "version"
+        ],
+        "properties": {
+          "appName": {
+            "type": "string",
+            "description": "`Radarr` for a Radarr, `Sonarr` for a Sonarr."
+          },
+          "instanceName": {
+            "type": "string",
+            "description": "The instance name set in the source's settings."
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
       "Counts": {
         "type": "object",
         "description": "How many source resources of one kind were created, found or left out.",
@@ -6980,6 +7109,9 @@
           "kind",
           "name",
           "url",
+          "position",
+          "resources",
+          "importQualityDefinitions",
           "createdAt"
         ],
         "properties": {
@@ -6989,6 +7121,10 @@
           "id": {
             "type": "integer",
             "format": "int32"
+          },
+          "importQualityDefinitions": {
+            "type": "boolean",
+            "description": "The source's global size limits are applied by a run."
           },
           "kind": {
             "type": "string"
@@ -7008,11 +7144,23 @@
           "name": {
             "type": "string"
           },
+          "position": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The order the source is listed and run in; lower comes first."
+          },
           "remotePath": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The groups it imports. Every group when it imports all of them."
           },
           "targetQualityProfileId": {
             "type": [
@@ -8487,6 +8635,10 @@
             "format": "password",
             "description": "The source's API key. It is stored encrypted and never returned."
           },
+          "importQualityDefinitions": {
+            "type": "boolean",
+            "description": "Apply the source's quality definitions to the global size limits."
+          },
           "kind": {
             "type": "string",
             "description": "The kind of source. Only `radarr` exists."
@@ -8507,6 +8659,13 @@
               "null"
             ],
             "description": "A path prefix as the source sees it. Needs `localPath`."
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The resource groups to import. Empty means all of them."
           },
           "targetQualityProfileId": {
             "type": [
@@ -9467,6 +9626,7 @@
           "indexers",
           "downloadClients",
           "qualityDefinitions",
+          "mergedMovies",
           "notes"
         ],
         "properties": {
@@ -9481,6 +9641,13 @@
           },
           "indexers": {
             "$ref": "#/components/schemas/Counts"
+          },
+          "mergedMovies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Titles of movies that already existed and were merged into. Empty when\nthe run created every movie."
           },
           "movies": {
             "$ref": "#/components/schemas/Counts"
@@ -9867,6 +10034,23 @@
           }
         }
       },
+      "SourceOrder": {
+        "type": "object",
+        "description": "The order the sources are listed and run in, first to last.",
+        "required": [
+          "ids"
+        ],
+        "properties": {
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "description": "Every source id, once."
+          }
+        }
+      },
       "SpecificationField": {
         "type": "object",
         "description": "One field of a custom format specification. Preserves extra Radarr metadata\nfields so imported formats round-trip unchanged.",
@@ -10024,6 +10208,24 @@
           "version": {
             "type": "string",
             "description": "The client version, for example `v4.6.2` or `4.3.2`."
+          }
+        }
+      },
+      "TestSource": {
+        "type": "object",
+        "description": "A source to try before it is saved. No `Debug`: it holds a key.",
+        "required": [
+          "url",
+          "apiKey"
+        ],
+        "properties": {
+          "apiKey": {
+            "type": "string",
+            "format": "password",
+            "description": "The source's API key. It is not stored."
+          },
+          "url": {
+            "type": "string"
           }
         }
       },

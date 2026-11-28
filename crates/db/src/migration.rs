@@ -27,6 +27,7 @@ impl MigratorTrait for Migrator {
             Box::new(M0016TvShows),
             Box::new(M0017History),
             Box::new(M0018ImportSources),
+            Box::new(M0019ImportSourceOrderAndOptions),
         ]
     }
 }
@@ -1069,6 +1070,35 @@ impl MigrationTrait for M0018ImportSources {
         manager
             .get_connection()
             .execute_unprepared(M0018_UP)
+            .await?;
+        Ok(())
+    }
+}
+
+struct M0019ImportSourceOrderAndOptions;
+
+impl MigrationName for M0019ImportSourceOrderAndOptions {
+    fn name(&self) -> &str {
+        "m0019_import_source_order_and_options"
+    }
+}
+
+/// The position orders the sources, `resources` is a JSON array of the
+/// groups to import (NULL means all), and `import_quality_definitions`
+/// applies the source's global size limits.
+const M0019_UP: &str = r#"
+ALTER TABLE import_sources ADD COLUMN position integer NOT NULL DEFAULT 0;
+ALTER TABLE import_sources ADD COLUMN resources text;
+ALTER TABLE import_sources ADD COLUMN import_quality_definitions integer NOT NULL DEFAULT 0;
+UPDATE import_sources SET position = id;
+"#;
+
+#[async_trait::async_trait]
+impl MigrationTrait for M0019ImportSourceOrderAndOptions {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(M0019_UP)
             .await?;
         Ok(())
     }

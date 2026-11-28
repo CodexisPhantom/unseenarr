@@ -421,6 +421,10 @@ pub fn routes() -> ApiRouter {
         )
         .require(
             Permission::ImportRun,
+            routes!(import_sources::test_source, import_sources::order_sources),
+        )
+        .require(
+            Permission::ImportRun,
             routes!(import_sources::delete_source),
         )
         .require(

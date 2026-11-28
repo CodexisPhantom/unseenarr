@@ -30,7 +30,7 @@ This document explains the conventions. The compat APIs are in
 | Events | `/events` (SSE) | M4 |
 | Tasks | `/tasks`, `/tasks/{name}/run` | M5 |
 | Blocklist, history | `/blocklist`, `/history` | M5 |
-| Import sources | `/import-sources`, `/import-sources/{id}/run` | M6 |
+| Import sources | `/import-sources`, `/import-sources/test`, `/import-sources/order`, `/import-sources/{id}/preview`, `/import-sources/{id}/run` | M6 |
 | Settings | `/settings` | M2 onward |
 
 ## Conventions
