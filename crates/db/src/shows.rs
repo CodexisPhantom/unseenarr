@@ -150,6 +150,24 @@ pub async fn episodes_of_season(
         .await
 }
 
+/// Every episode with one of the given ids, by show, season then episode
+/// number.
+pub async fn episodes_by_ids(
+    db: &DatabaseConnection,
+    ids: &[i32],
+) -> Result<Vec<episodes::Model>, DbErr> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    episodes::Entity::find()
+        .filter(episodes::Column::Id.is_in(ids.iter().copied()))
+        .order_by_asc(episodes::Column::ShowId)
+        .order_by_asc(episodes::Column::SeasonNumber)
+        .order_by_asc(episodes::Column::EpisodeNumber)
+        .all(db)
+        .await
+}
+
 /// Sets the monitored flag of one episode. Returns `None` when missing.
 pub async fn set_episode_monitored(
     db: &DatabaseConnection,
@@ -162,6 +180,24 @@ pub async fn set_episode_monitored(
     let mut episode: episodes::ActiveModel = current.into();
     episode.monitored = Set(monitored);
     Ok(Some(episode.update(db).await?))
+}
+
+/// Sets the monitored flag of every episode in one statement.
+pub async fn set_episodes_monitored(
+    db: &DatabaseConnection,
+    ids: &[i32],
+    monitored: bool,
+) -> Result<(), DbErr> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    episodes::Entity::update_many()
+        .col_expr(episodes::Column::Monitored, monitored.into())
+        .filter(episodes::Column::Id.is_in(ids.iter().copied()))
+        .exec(db)
+        .await?
+        ;
+    Ok(())
 }
 
 /// Every file of a show, by path.

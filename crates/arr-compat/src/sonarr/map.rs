@@ -330,7 +330,7 @@ fn clean_title(title: &str) -> String {
         .collect()
 }
 
-fn join(root: &str, name: &str) -> String {
+pub fn join(root: &str, name: &str) -> String {
     let separator = if root.contains('\\') && !root.contains('/') {
         '\\'
     } else {

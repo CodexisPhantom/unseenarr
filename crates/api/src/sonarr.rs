@@ -2,11 +2,11 @@
 //! (docs/14-compatibility.md, section D "Sonarr endpoints (M8)").
 //!
 //! Shared endpoints (`system/status`, `qualityprofile`, `rootfolder`,
-//! `languageprofile`, and `tag`) are served here, and the series read
-//! endpoints live in [`crate::sonarr_series`]. Series add, update, delete and
-//! lookup, plus `episode`, `queue` and `command`, await the shows CRUD layer
-//! (#88) and downloads queue (#63) and fall through to the logged `501 Not
-//! Implemented` fallback.
+//! `languageprofile`, and `tag`) are served here, the series read endpoints
+//! live in [`crate::sonarr_series`], and the episode endpoints live in
+//! [`crate::sonarr_episodes`]. Series add, update, delete and lookup, plus
+//! `queue` and `command`, await the shows CRUD layer (#88) and downloads queue
+//! (#63) and fall through to the logged `501 Not Implemented` fallback.
 
 use std::path::Path;
 
@@ -81,6 +81,18 @@ pub fn routes() -> CompatRouter {
             Method::GET,
             "/series/{id}",
             crate::sonarr_series::get_series,
+        )
+        .require(
+            Permission::LibraryRead,
+            Method::GET,
+            "/episode",
+            crate::sonarr_episodes::list_episodes,
+        )
+        .require(
+            Permission::LibraryEdit,
+            Method::PUT,
+            "/episode/monitor",
+            crate::sonarr_episodes::monitor_episodes,
         )
         .require(Permission::LibraryRead, Method::GET, "/tag", list_tags)
         .require(Permission::LibraryEdit, Method::POST, "/tag", create_tag)

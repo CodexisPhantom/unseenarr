@@ -10,8 +10,8 @@ use api::compat::CompatRouteEntry;
 use api::{AppState, router, sonarr_routes};
 use arr_compat::sonarr::SONARR_VERSION;
 use arr_compat::sonarr::dto::{
-    LanguageProfileResource, QualityProfileResource, RootFolderResource, SeriesResource,
-    SystemResource, TagResource,
+    EpisodeResource, LanguageProfileResource, QualityProfileResource, ReleaseType,
+    RootFolderResource, SeriesResource, SystemResource, TagResource,
 };
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -19,7 +19,7 @@ use axum::http::{Method, Request, StatusCode, header};
 use better_auth::seaorm::sea_orm::{ActiveModelTrait, Set};
 use db::entities::{
     episode_file_episodes, episode_files, episodes, role_permissions, roles, seasons, shows,
-    user_roles,
+    user_role_libraries, user_roles,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -223,6 +223,74 @@ impl App {
         cookie
     }
 
+    /// A member whose role is scoped to the given libraries; `None` means all
+    /// libraries.
+    async fn member_scoped(
+        &self,
+        email: &str,
+        permissions: &[&str],
+        library_ids: Option<&[i32]>,
+    ) -> String {
+        let prefix = &self.state.base_path;
+        self.state.policy.admit_next_signup();
+        let sign_up = json!({ "email": email, "password": PASSWORD, "name": "Seerr" });
+        let reply = self
+            .send(
+                Request::post(format!("{prefix}/api/auth/sign-up/email"))
+                    .header(header::HOST, HOST)
+                    .header(header::ORIGIN, ORIGIN)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(sign_up.to_string()))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        let user_id = reply.body["user"]["id"].as_str().unwrap().to_owned();
+        let cookie = reply.session_pair();
+
+        let role = roles::ActiveModel {
+            name: Set(format!("Role of {email}")),
+            is_owner: Set(false),
+            created_at: Set(db::now()),
+            updated_at: Set(db::now()),
+            ..Default::default()
+        }
+        .insert(&self.state.db)
+        .await
+        .unwrap();
+        for permission in permissions {
+            role_permissions::ActiveModel {
+                role_id: Set(role.id),
+                permission: Set((*permission).into()),
+            }
+            .insert(&self.state.db)
+            .await
+            .unwrap();
+        }
+        user_roles::ActiveModel {
+            user_id: Set(user_id.clone()),
+            role_id: Set(role.id),
+            all_libraries: Set(library_ids.is_none()),
+        }
+        .insert(&self.state.db)
+        .await
+        .unwrap();
+        if let Some(library_ids) = library_ids {
+            for library_id in library_ids {
+                user_role_libraries::ActiveModel {
+                    user_id: Set(user_id.clone()),
+                    role_id: Set(role.id),
+                    library_id: Set(*library_id),
+                }
+                .insert(&self.state.db)
+                .await
+                .unwrap();
+            }
+        }
+
+        cookie
+    }
+
     async fn create_key(&self, cookie: &str, permissions: &[&str]) -> String {
         let prefix = &self.state.base_path;
         let body = json!({ "name": "Seerr", "permissions": permissions });
@@ -290,6 +358,16 @@ fn sonarr_routes_declare_expected_permissions() {
                 method: Method::GET,
                 path: "/sonarr/api/v3/series/{id}".to_owned(),
                 permission: Some(Permission::LibraryRead),
+            },
+            CompatRouteEntry {
+                method: Method::GET,
+                path: "/sonarr/api/v3/episode".to_owned(),
+                permission: Some(Permission::LibraryRead),
+            },
+            CompatRouteEntry {
+                method: Method::PUT,
+                path: "/sonarr/api/v3/episode/monitor".to_owned(),
+                permission: Some(Permission::LibraryEdit),
             },
             CompatRouteEntry {
                 method: Method::GET,
@@ -425,6 +503,16 @@ async fn every_implemented_route_enforces_its_permission() {
         (Method::GET, "/sonarr/api/v3/series", "library:read"),
         (Method::GET, "/sonarr/api/v3/series/1", "library:read"),
         (Method::GET, "/sonarr/api/v3/series/lookup", "library:read"),
+        (
+            Method::GET,
+            "/sonarr/api/v3/episode?seriesId=1",
+            "library:read",
+        ),
+        (
+            Method::PUT,
+            "/sonarr/api/v3/episode/monitor",
+            "library:edit",
+        ),
         (Method::POST, "/sonarr/api/v3/tag", "library:edit"),
         (Method::PUT, "/sonarr/api/v3/tag/1", "library:edit"),
     ];
@@ -1089,4 +1177,346 @@ async fn series_list_is_empty_without_shows() {
         .await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     assert_eq!(reply.body, json!([]));
+}
+
+#[tokio::test]
+async fn episode_list_maps_episodes_with_sonarr_defaults() {
+    let app = App::new().await;
+    let key = app.create_key(&app.owner, &["library:read"]).await;
+
+    let tv_dir = tempfile::tempdir().unwrap();
+    let root =
+        db::root_folders::create(&app.state.db, tv_dir.path().to_string_lossy().into_owned())
+            .await
+            .unwrap();
+    let show_id = add_show(&app, root.id, 81189, "Breaking Bad").await;
+    add_season(&app, show_id, 1).await;
+    let first = add_episode(&app, show_id, 1, 1, "2008-01-20T02:00:00Z").await;
+    add_episode(&app, show_id, 1, 2, "2099-01-01T00:00:00Z").await;
+    add_episode_file(&app, show_id, 1_000, "GROUP", first).await;
+
+    let reply = app
+        .send(
+            req(
+                Method::GET,
+                &format!("/sonarr/api/v3/episode?seriesId={show_id}"),
+            )
+            .header("X-Api-Key", &key)
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let episodes: Vec<EpisodeResource> = serde_json::from_value(reply.body).unwrap();
+    assert_eq!(episodes.len(), 2);
+    let watched = &episodes[0];
+    assert_eq!(watched.series_id, show_id);
+    assert_eq!(watched.season_number, 1);
+    assert_eq!(watched.episode_number, 1);
+    assert_eq!(watched.title, "Episode 1");
+    assert!(watched.monitored);
+    assert!(watched.has_file);
+    assert!(watched.episode_file_id > 0);
+    assert!(watched.episode_file.is_none());
+    assert!(watched.series.is_none());
+    assert!(!episodes[1].has_file);
+
+    let expanded = app
+        .send(
+            req(
+                Method::GET,
+                &format!(
+                    "/sonarr/api/v3/episode?seriesId={show_id}&includeEpisodeFile=true&includeSeries=true"
+                ),
+            )
+            .header("X-Api-Key", &key)
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(expanded.status, StatusCode::OK, "{}", expanded.body);
+    let episodes: Vec<EpisodeResource> = serde_json::from_value(expanded.body).unwrap();
+    let file = episodes[0].episode_file.as_ref().expect("episode file");
+    assert_eq!(file.series_id, show_id);
+    assert_eq!(file.season_number, 1);
+    assert_eq!(file.relative_path, "Season 01/Episode 01.mkv");
+    assert_eq!(file.release_type, ReleaseType::SingleEpisode);
+    assert_eq!(file.release_group, "GROUP");
+    assert!(file.path.ends_with("Breaking Bad/Season 01/Episode 01.mkv"));
+    let series = episodes[0].series.as_ref().expect("series");
+    assert_eq!(series.id, show_id);
+    assert_eq!(series.title, "Breaking Bad");
+}
+
+#[tokio::test]
+async fn episode_list_filters_by_season_and_validates_series_id() {
+    let app = App::new().await;
+    let key = app.create_key(&app.owner, &["library:read"]).await;
+
+    let tv_dir = tempfile::tempdir().unwrap();
+    let root =
+        db::root_folders::create(&app.state.db, tv_dir.path().to_string_lossy().into_owned())
+            .await
+            .unwrap();
+    let show_id = add_show(&app, root.id, 81189, "Breaking Bad").await;
+    for season in 0..=2 {
+        add_season(&app, show_id, season).await;
+    }
+    add_episode(&app, show_id, 0, 1, "2008-01-20T02:00:00Z").await;
+    add_episode(&app, show_id, 1, 1, "2008-01-27T02:00:00Z").await;
+    add_episode(&app, show_id, 2, 1, "2009-03-08T02:00:00Z").await;
+
+    let reply = app
+        .send(
+            req(
+                Method::GET,
+                &format!("/sonarr/api/v3/episode?seriesId={show_id}&seasonNumber=1"),
+            )
+            .header("X-Api-Key", &key)
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let episodes: Vec<EpisodeResource> = serde_json::from_value(reply.body).unwrap();
+    assert_eq!(episodes.len(), 1);
+    assert_eq!(episodes[0].season_number, 1);
+
+    for uri in [
+        "/sonarr/api/v3/episode",
+        "/sonarr/api/v3/episode?seriesId=",
+        "/sonarr/api/v3/episode?seriesId=0",
+        "/sonarr/api/v3/episode?seriesId=abc",
+    ] {
+        let reply = app
+            .send(
+                req(Method::GET, uri)
+                    .header("X-Api-Key", &key)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{uri}");
+    }
+
+    let bad_season = app
+        .send(
+            req(
+                Method::GET,
+                &format!("/sonarr/api/v3/episode?seriesId={show_id}&seasonNumber=abc"),
+            )
+            .header("X-Api-Key", &key)
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(bad_season.status, StatusCode::BAD_REQUEST);
+
+    let unknown = app
+        .send(
+            req(Method::GET, "/sonarr/api/v3/episode?seriesId=999999")
+                .header("X-Api-Key", &key)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn episode_monitor_updates_dedupes_and_rejects_unknown_ids() {
+    let app = App::new().await;
+    let key = app.create_key(&app.owner, &["library:edit"]).await;
+
+    let tv_dir = tempfile::tempdir().unwrap();
+    let root =
+        db::root_folders::create(&app.state.db, tv_dir.path().to_string_lossy().into_owned())
+            .await
+            .unwrap();
+    let show_id = add_show(&app, root.id, 81189, "Breaking Bad").await;
+    add_season(&app, show_id, 1).await;
+    let first = add_episode(&app, show_id, 1, 1, "2008-01-20T02:00:00Z").await;
+    let second = add_episode(&app, show_id, 1, 2, "2008-01-27T02:00:00Z").await;
+
+    let reply = app
+        .send(
+            req(Method::PUT, "/sonarr/api/v3/episode/monitor")
+                .header("X-Api-Key", &key)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "episodeIds": [first, first, second], "monitored": false }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let episodes = db::shows::episodes_of(&app.state.db, show_id)
+        .await
+        .unwrap();
+    assert_eq!(episodes.len(), 2);
+    assert!(episodes.iter().all(|episode| !episode.monitored));
+
+    let repeated = app
+        .send(
+            req(Method::PUT, "/sonarr/api/v3/episode/monitor")
+                .header("X-Api-Key", &key)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "episodeIds": [first, second], "monitored": false }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(repeated.status, StatusCode::OK, "{}", repeated.body);
+
+    let missing = app
+        .send(
+            req(Method::PUT, "/sonarr/api/v3/episode/monitor")
+                .header("X-Api-Key", &key)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "episodeIds": [999999], "monitored": true }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
+
+    for body in [
+        json!({ "episodeIds": [], "monitored": false }),
+        json!({ "episodeIds": [first] }),
+        json!({ "episodeIds": [0], "monitored": true }),
+    ] {
+        let reply = app
+            .send(
+                req(Method::PUT, "/sonarr/api/v3/episode/monitor")
+                    .header("X-Api-Key", &key)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    let malformed = app
+        .send(
+            req(Method::PUT, "/sonarr/api/v3/episode/monitor")
+                .header("X-Api-Key", &key)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{not-json"))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn episode_endpoints_honour_library_scope() {
+    let app = App::new().await;
+
+    let allowed_dir = tempfile::tempdir().unwrap();
+    let allowed_root = db::root_folders::create(
+        &app.state.db,
+        allowed_dir.path().to_string_lossy().into_owned(),
+    )
+    .await
+    .unwrap();
+    let allowed_show = add_show(&app, allowed_root.id, 81189, "Breaking Bad").await;
+    add_season(&app, allowed_show, 1).await;
+    let allowed_episode = add_episode(&app, allowed_show, 1, 1, "2008-01-20T02:00:00Z").await;
+
+    let other_library = db::libraries::create(&app.state.db, "Other".to_owned())
+        .await
+        .unwrap()
+        .library
+        .id;
+    let other_dir = tempfile::tempdir().unwrap();
+    let other_root = db::root_folders::create_in_library(
+        &app.state.db,
+        other_dir.path().to_string_lossy().into_owned(),
+        other_library,
+    )
+    .await
+    .unwrap();
+    let other_show = add_show(&app, other_root.id, 121361, "Game of Thrones").await;
+    add_season(&app, other_show, 1).await;
+    let other_episode = add_episode(&app, other_show, 1, 1, "2011-04-17T01:00:00Z").await;
+
+    let cookie = app
+        .member_scoped(
+            "scoped@example.com",
+            &["library:read", "library:edit"],
+            Some(&[allowed_root.library_id]),
+        )
+        .await;
+    let key = app
+        .create_key(&cookie, &["library:read", "library:edit"])
+        .await;
+
+    let visible = app
+        .send(
+            req(
+                Method::GET,
+                &format!("/sonarr/api/v3/episode?seriesId={allowed_show}"),
+            )
+            .header("X-Api-Key", &key)
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(visible.status, StatusCode::OK, "{}", visible.body);
+
+    let hidden = app
+        .send(
+            req(
+                Method::GET,
+                &format!("/sonarr/api/v3/episode?seriesId={other_show}"),
+            )
+            .header("X-Api-Key", &key)
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(hidden.status, StatusCode::NOT_FOUND, "{}", hidden.body);
+
+    let hidden_monitor = app
+        .send(
+            req(Method::PUT, "/sonarr/api/v3/episode/monitor")
+                .header("X-Api-Key", &key)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "episodeIds": [other_episode], "monitored": false }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        hidden_monitor.status,
+        StatusCode::NOT_FOUND,
+        "{}",
+        hidden_monitor.body
+    );
+    let untouched = db::shows::episodes_of(&app.state.db, other_show)
+        .await
+        .unwrap();
+    assert!(untouched.iter().all(|episode| episode.monitored));
+
+    let allowed_monitor = app
+        .send(
+            req(Method::PUT, "/sonarr/api/v3/episode/monitor")
+                .header("X-Api-Key", &key)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "episodeIds": [allowed_episode], "monitored": false }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        allowed_monitor.status,
+        StatusCode::OK,
+        "{}",
+        allowed_monitor.body
+    );
 }

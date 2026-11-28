@@ -34,6 +34,7 @@ mod roles;
 mod root_folders;
 pub mod setup;
 pub mod sonarr;
+mod sonarr_episodes;
 mod sonarr_series;
 mod subtitles;
 mod tags;

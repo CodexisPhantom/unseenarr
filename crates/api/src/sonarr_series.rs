@@ -193,7 +193,7 @@ fn group_by_show<T>(items: Vec<T>, show_id: impl Fn(&T) -> i32) -> HashMap<i32, 
     grouped
 }
 
-async fn load_series_views(
+pub(crate) async fn load_series_views(
     state: &AppState,
     shows: &[StoredShow],
 ) -> Result<Vec<SeriesView>, CompatError> {
