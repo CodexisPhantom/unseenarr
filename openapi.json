@@ -3978,8 +3978,8 @@
             }
           }
         },
-        "x-permission": "authenticated",
-        "x-owner-only": true
+        "x-owner-only": true,
+        "x-permission": "authenticated"
       }
     },
     "/api/v1/permissions": {
@@ -8641,7 +8641,7 @@
           },
           "kind": {
             "type": "string",
-            "description": "The kind of source. Only `radarr` exists."
+            "description": "The kind of source: `radarr` or `prowlarr`."
           },
           "localPath": {
             "type": [

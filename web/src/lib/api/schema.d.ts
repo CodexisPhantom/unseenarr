@@ -2261,7 +2261,7 @@ export interface components {
             apiKey: string;
             /** @description Apply the source's quality definitions to the global size limits. */
             importQualityDefinitions?: boolean;
-            /** @description The kind of source. Only `radarr` exists. */
+            /** @description The kind of source: `radarr` or `prowlarr`. */
             kind: string;
             /** @description The same prefix on this machine. Needs `remotePath`. */
             localPath?: string | null;

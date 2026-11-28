@@ -261,9 +261,31 @@ Radarr masks secret fields in `/indexer` and `/downloadclient` responses.
 Open question: import those entries disabled and ask the user to re-enter the
 secret.
 
-## Sonarr (M8), Prowlarr (M11)
+## Sonarr (M8)
 
-Sonarr: v3, same pattern with `/series`. Prowlarr: API v1, `GET /api/v1/indexer`.
+v3, same pattern with `/series`. Not built yet.
+
+## Prowlarr as import source (M11)
+
+| | |
+|---|---|
+| Endpoints (v1, read-only) | `GET /api/v1/indexer` |
+| Auth | `X-Api-Key` header |
+| Rate limits | None |
+| Failure | Import stops with a report; safe to re-run |
+| Mock | Fixture `fixtures/prowlarr/indexer.json`, shaped after the v1 answer |
+
+Every Prowlarr indexer becomes one indexer here: a torrent indexer
+becomes Torznab, a usenet indexer becomes Newznab. Both point at
+Prowlarr's per-indexer feed, `<prowlarr>/<indexerId>/api`, and carry the
+import source's Prowlarr API key as their key. Imported indexers arrive
+enabled.
+
+The original definition is not rebuilt: Prowlarr masks each indexer's own
+key, and a Cardigann definition signs in with a user name and password
+that Unseenarr does not model. The feed also keeps Prowlarr's category
+mapping. Prowlarr tags are not imported; they are Prowlarr ids and need
+endpoints outside this issue.
 
 ## Decisions (2026-11-15)
 

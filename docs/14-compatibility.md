@@ -44,6 +44,15 @@ Read-only against the source. Safe to re-run (`import_map` table).
 | Indexers | `GET /indexer` | Torznab indexers only; secrets are masked upstream, so entries arrive disabled |
 | Download clients | `GET /downloadclient` | qBittorrent only; password must be re-entered |
 
+Prowlarr (`kind` `prowlarr`, `GET /api/v1/indexer`): one Torznab indexer
+per torrent indexer and one Newznab indexer per usenet indexer, each at
+`<prowlarr>/<indexerId>/api` with the import source's Prowlarr API key.
+The original definition is not rebuilt: Prowlarr masks the indexer's key
+and Cardigann definitions sign in with a login Unseenarr does not model.
+Imported entries arrive enabled and are safe to re-run.
+A Prowlarr source has no quality definitions and imports the `indexers`
+group only; it is ordered and listed with the Radarr sources.
+
 Several instances: each import source has a target quality profile. All
 movies from that source get that profile, or keep their mapped profile if no
 target is set.
@@ -73,7 +82,7 @@ Custom formats with the same name and different conditions in two instances:
 the first source wins, the second is imported as `<name> (<source name>)`
 and reported.
 
-Later: Sonarr (M8), Prowlarr indexers through its v1 API (M11). Bazarr
+Later: Sonarr (M8). Bazarr
 settings: not in V1, decided in the subtitles design (M10).
 
 ## D. API for companion tools

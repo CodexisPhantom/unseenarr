@@ -146,6 +146,7 @@ const MOVIES: &str = include_str!("../../../fixtures/radarr/movie.json");
 const INDEXERS: &str = include_str!("../../../fixtures/radarr/indexer.json");
 const DOWNLOAD_CLIENTS: &str = include_str!("../../../fixtures/radarr/downloadclient.json");
 const DEFINITIONS: &str = include_str!("../../../fixtures/radarr/qualitydefinition.json");
+const PROWLARR_INDEXERS: &str = include_str!("../../../fixtures/prowlarr/indexer.json");
 
 const RESOURCES: [&str; 10] = [
     store::ROOT_FOLDER,
@@ -245,6 +246,29 @@ async fn add_source(app: &App, name: &str, radarr: &MockServer, target: Option<i
     let (status, source) = app.owner(Method::POST, SOURCES, Some(body)).await;
     assert_eq!(status, StatusCode::CREATED, "{source}");
     i32::try_from(source["id"].as_i64().unwrap()).unwrap()
+}
+
+async fn add_prowlarr_source(app: &App, name: &str, server: &MockServer) -> i32 {
+    let body = json!({"kind": "prowlarr", "name": name, "url": server.uri(), "apiKey": KEY});
+    let (status, source) = app.owner(Method::POST, SOURCES, Some(body)).await;
+    assert_eq!(status, StatusCode::CREATED, "{source}");
+    i32::try_from(source["id"].as_i64().unwrap()).unwrap()
+}
+
+async fn mount_prowlarr(server: &MockServer, runs: u64) {
+    Mock::given(method("GET"))
+        .and(path("/api/v1/indexer"))
+        .respond_with(json_body(PROWLARR_INDEXERS, 200))
+        .expect(runs)
+        .mount(server)
+        .await;
+    for verb in ["POST", "PUT", "PATCH", "DELETE"] {
+        Mock::given(method(verb))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(server)
+            .await;
+    }
 }
 
 async fn import(app: &App, id: i32, action: &str) -> Value {
@@ -561,6 +585,109 @@ async fn a_member_without_import_run_cannot_use_the_source() {
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
 }
 
+#[tokio::test]
+async fn a_prowlarr_run_imports_indexers_and_a_second_run_creates_nothing() {
+    let (app, _tmdb) = app().await;
+    db::indexers::create(
+        &app.state.db,
+        db::indexers::Values {
+            name: "Example Tracker".to_owned(),
+            kind: "torznab".to_owned(),
+            url: "http://elsewhere.test/api".to_owned(),
+            api_key: db::secret::encrypt(&app.state.secrets, &db::secret::Secret::new(KEY)),
+            categories: json!([2000]),
+            priority: 25,
+            use_proxy: false,
+            enabled: true,
+            tags: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    let server = MockServer::start().await;
+    mount_prowlarr(&server, 2).await;
+    let id = add_prowlarr_source(&app, "Prowlarr", &server).await;
+
+    let report = import(&app, id, "run").await;
+    assert_eq!(report["indexers"]["created"], 3, "{report}");
+
+    let indexers = db::indexers::list(&app.state.db).await.unwrap();
+    assert_eq!(indexers.len(), 4, "{report}");
+    let by_name = |name: &str| {
+        indexers
+            .iter()
+            .find(|row| row.model.name == name)
+            .unwrap_or_else(|| panic!("no indexer {name}: {report}"))
+    };
+    let renamed = by_name("Example Tracker (Prowlarr)");
+    assert_eq!(renamed.model.kind, "torznab");
+    assert_eq!(renamed.model.url, format!("{}/1/api", server.uri()));
+    assert_eq!(renamed.model.categories, json!([2000, 5000]));
+    assert_eq!(renamed.model.priority, 25);
+    assert!(renamed.model.enabled);
+    assert!(!renamed.model.use_proxy);
+    assert!(renamed.tags.is_empty());
+    assert_eq!(
+        db::secret::decrypt(&app.state.secrets, &renamed.model.api_key)
+            .unwrap()
+            .expose(),
+        KEY
+    );
+    let geek = by_name("NZBgeek");
+    assert_eq!(geek.model.kind, "newznab");
+    assert_eq!(geek.model.url, format!("{}/2/api", server.uri()));
+    assert_eq!(geek.model.categories, json!([5030, 5040]));
+    assert_eq!(geek.model.priority, 30);
+    let rss = by_name("Torrent RSS");
+    assert_eq!(rss.model.kind, "torznab");
+    assert_eq!(rss.model.url, format!("{}/3/api", server.uri()));
+    assert_eq!(rss.model.priority, 1);
+
+    assert_eq!(
+        store::map_for(&app.state.db, id, store::INDEXER)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+    assert!(last_import_at(&app, id).await.is_some());
+    assert!(
+        report["notes"].to_string().contains("Prowlarr"),
+        "{}",
+        report["notes"]
+    );
+
+    let second = import(&app, id, "run").await;
+    assert_eq!(second["indexers"]["created"], 0, "{second}");
+    assert_eq!(db::indexers::list(&app.state.db).await.unwrap().len(), 4);
+    assert_eq!(
+        store::map_for(&app.state.db, id, store::INDEXER)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn a_prowlarr_preview_writes_nothing() {
+    let (app, _tmdb) = app().await;
+    let server = MockServer::start().await;
+    mount_prowlarr(&server, 1).await;
+    let id = add_prowlarr_source(&app, "Prowlarr", &server).await;
+
+    let preview = import(&app, id, "preview").await;
+    assert_eq!(preview["indexers"]["created"], 3, "{preview}");
+    assert!(db::indexers::list(&app.state.db).await.unwrap().is_empty());
+    assert!(
+        store::map_for(&app.state.db, id, store::INDEXER)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(last_import_at(&app, id).await, None);
+}
+
 /// The sources in the order the list returns them.
 async fn source_names(app: &App) -> Vec<String> {
     let (status, body) = app.owner(Method::GET, SOURCES, None).await;
@@ -599,6 +726,52 @@ async fn the_order_of_sources_can_be_changed() {
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     assert_eq!(source_names(&app).await, ["B", "A"]);
+}
+
+#[tokio::test]
+async fn a_prowlarr_source_is_ordered_with_the_radarr_ones_and_imports_indexers_only() {
+    let (app, _tmdb) = app().await;
+    let (radarr, prowlarr) = (MockServer::start().await, MockServer::start().await);
+    let radarr_id = add_source(&app, "Radarr", &radarr, None).await;
+    let prowlarr_id = add_prowlarr_source(&app, "Prowlarr", &prowlarr).await;
+
+    let (status, body) = app.owner(Method::GET, SOURCES, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed = body.as_array().unwrap();
+    assert_eq!(listed[1]["kind"], "prowlarr", "{body}");
+    assert_eq!(
+        listed[1]["position"],
+        listed[0]["position"].as_i64().unwrap() + 1
+    );
+    assert_eq!(listed[1]["resources"], json!(["indexers"]), "{body}");
+    assert_eq!(listed[1]["importQualityDefinitions"], false, "{body}");
+    assert_eq!(
+        listed[0]["resources"].as_array().unwrap().len(),
+        8,
+        "{body}"
+    );
+
+    let (status, body) = app
+        .owner(
+            Method::PATCH,
+            &format!("{SOURCES}/order"),
+            Some(json!({ "ids": [prowlarr_id, radarr_id] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(source_names(&app).await, ["Prowlarr", "Radarr"]);
+
+    for extra in [
+        json!({"resources": ["indexers", "tags"]}),
+        json!({"importQualityDefinitions": true}),
+    ] {
+        let mut body = json!({"kind": "prowlarr", "name": "Other", "url": "http://prowlarr:9697", "apiKey": KEY});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let (status, body) = app.owner(Method::POST, SOURCES, Some(body)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    }
 }
 
 #[tokio::test]

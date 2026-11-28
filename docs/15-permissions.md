@@ -26,7 +26,7 @@ Fixed in code as a Rust enum in `crates/core`. Format `resource:action`.
 | `release:grab` | Send a chosen release to a download client |
 | `queue:read` | See downloads and their progress |
 | `queue:manage` | Remove, retry or blocklist downloads |
-| `import:run` | Adopt a library folder; run an import from Radarr/Sonarr |
+| `import:run` | Adopt a library folder; run an import from Radarr/Sonarr/Prowlarr |
 | `subtitles:manage` | Create, edit and delete language profiles; set the language profile of a movie and the default profile; scan for, search, download and delete subtitles (M10) |
 | `indexers:read` | See indexers without secrets |
 | `indexers:manage` | Create, edit, delete and test indexers |

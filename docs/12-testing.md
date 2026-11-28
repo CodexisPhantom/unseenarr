@@ -21,6 +21,7 @@ Status: reviewed (2026-11-16).
   responses, secrets removed.
 - `fixtures/radarr`: recorded pairs per implemented endpoint, with the Radarr
   version in the file name.
+- `fixtures/prowlarr`: a v1 GET /api/v1/indexer answer, shaped from the API schema.
 - The release-name table in [07-release-scoring.md](07-release-scoring.md) is
   a data file read by the tests and by the doc check.
 

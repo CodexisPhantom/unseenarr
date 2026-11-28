@@ -1,0 +1,79 @@
+[
+  {
+    "id": 1,
+    "name": "Example Tracker",
+    "fields": [
+      { "order": 0, "name": "definitionFile", "label": "Prowlarr indexer", "value": "example", "type": "select", "advanced": false, "privacy": "normal" },
+      { "order": 1, "name": "baseUrl", "label": "Base URL", "value": "https://tracker.example/", "type": "textbox", "advanced": false, "privacy": "normal" },
+      { "order": 2, "name": "apiKey", "label": "API Key", "value": "********", "type": "textbox", "advanced": false, "privacy": "apiKey" },
+      { "order": 3, "name": "categories", "label": "Categories", "value": [2000, 5000], "type": "select", "advanced": false, "privacy": "normal" },
+      { "order": 4, "name": "minimumSeeders", "label": "Minimum Seeders", "value": 5, "type": "number", "advanced": true, "privacy": "normal" }
+    ],
+    "implementationName": "Cardigann",
+    "implementation": "Cardigann",
+    "configContract": "CardigannSettings",
+    "infoLink": "https://wiki.servarr.com/prowlarr/supported-indexers",
+    "tags": [1],
+    "presets": [],
+    "enableRss": true,
+    "enableAutomaticSearch": true,
+    "enableInteractiveSearch": true,
+    "supportsRss": true,
+    "supportsSearch": true,
+    "protocol": "torrent",
+    "priority": 25,
+    "downloadClientId": 0,
+    "definitionName": "example",
+    "appProfileId": 1
+  },
+  {
+    "id": 2,
+    "name": "NZBgeek",
+    "fields": [
+      { "order": 0, "name": "baseUrl", "label": "Base URL", "value": "https://api.nzbgeek.info", "type": "textbox", "advanced": false, "privacy": "normal" },
+      { "order": 1, "name": "apiKey", "label": "API Key", "value": "********", "type": "textbox", "advanced": false, "privacy": "apiKey" },
+      { "order": 2, "name": "categories", "label": "Categories", "value": [5030, 5040], "type": "select", "advanced": false, "privacy": "normal" }
+    ],
+    "implementationName": "Newznab",
+    "implementation": "Newznab",
+    "configContract": "NewznabSettings",
+    "infoLink": "https://wiki.servarr.com/prowlarr/supported-indexers",
+    "tags": [],
+    "presets": [],
+    "enableRss": true,
+    "enableAutomaticSearch": true,
+    "enableInteractiveSearch": true,
+    "supportsRss": true,
+    "supportsSearch": true,
+    "protocol": "usenet",
+    "priority": 30,
+    "downloadClientId": 0,
+    "definitionName": "nzbgeek",
+    "appProfileId": 1
+  },
+  {
+    "id": 3,
+    "name": "Torrent RSS",
+    "fields": [
+      { "order": 0, "name": "baseUrl", "label": "Base URL", "value": "https://feed.example/", "type": "textbox", "advanced": false, "privacy": "normal" },
+      { "order": 1, "name": "apiKey", "label": "API Key", "value": "********", "type": "textbox", "advanced": false, "privacy": "apiKey" },
+      { "order": 2, "name": "categories", "label": "Categories", "value": [2000, 2040], "type": "select", "advanced": false, "privacy": "normal" }
+    ],
+    "implementationName": "Torznab",
+    "implementation": "Torznab",
+    "configContract": "TorznabSettings",
+    "infoLink": "https://wiki.servarr.com/prowlarr/supported-indexers",
+    "tags": [2],
+    "presets": [],
+    "enableRss": true,
+    "enableAutomaticSearch": true,
+    "enableInteractiveSearch": true,
+    "supportsRss": true,
+    "supportsSearch": true,
+    "protocol": "torrent",
+    "priority": 1,
+    "downloadClientId": 0,
+    "definitionName": "torrent-rss",
+    "appProfileId": 1
+  }
+]

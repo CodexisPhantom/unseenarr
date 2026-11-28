@@ -1,3 +1,4 @@
+pub mod prowlarr;
 pub mod radarr;
 pub mod sonarr;
 

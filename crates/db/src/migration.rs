@@ -28,6 +28,7 @@ impl MigratorTrait for Migrator {
             Box::new(M0017History),
             Box::new(M0018ImportSources),
             Box::new(M0019ImportSourceOrderAndOptions),
+            Box::new(M0020ProwlarrImportSources),
         ]
     }
 }
@@ -1099,6 +1100,64 @@ impl MigrationTrait for M0019ImportSourceOrderAndOptions {
         manager
             .get_connection()
             .execute_unprepared(M0019_UP)
+            .await?;
+        Ok(())
+    }
+}
+
+struct M0020ProwlarrImportSources;
+
+impl MigrationName for M0020ProwlarrImportSources {
+    fn name(&self) -> &str {
+        "m0020_prowlarr_import_sources"
+    }
+}
+
+/// Prowlarr is the second import source kind (docs/14-compatibility.md,
+/// section C). SQLite cannot widen a CHECK in place, so the table is rebuilt
+/// and its rows are copied, including the columns m0019 added; `import_map`
+/// keeps its foreign key by table name.
+const M0020_UP: &str = r#"
+PRAGMA foreign_keys = OFF;
+BEGIN;
+
+CREATE TABLE import_sources_new (
+    id integer PRIMARY KEY AUTOINCREMENT,
+    kind text NOT NULL CHECK (kind IN ('radarr', 'prowlarr')),
+    name text NOT NULL,
+    url text NOT NULL UNIQUE,
+    api_key text NOT NULL,
+    target_quality_profile_id integer REFERENCES quality_profiles (id) ON DELETE SET NULL,
+    remote_path text,
+    local_path text,
+    last_import_at text,
+    created_at text NOT NULL,
+    updated_at text NOT NULL,
+    position integer NOT NULL DEFAULT 0,
+    resources text,
+    import_quality_definitions integer NOT NULL DEFAULT 0,
+    CHECK ((remote_path IS NULL) = (local_path IS NULL))
+);
+INSERT INTO import_sources_new (id, kind, name, url, api_key, target_quality_profile_id,
+                                remote_path, local_path, last_import_at, created_at, updated_at,
+                                position, resources, import_quality_definitions)
+SELECT id, kind, name, url, api_key, target_quality_profile_id,
+       remote_path, local_path, last_import_at, created_at, updated_at,
+       position, resources, import_quality_definitions
+FROM import_sources;
+DROP TABLE import_sources;
+ALTER TABLE import_sources_new RENAME TO import_sources;
+
+COMMIT;
+PRAGMA foreign_keys = ON;
+"#;
+
+#[async_trait::async_trait]
+impl MigrationTrait for M0020ProwlarrImportSources {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(M0020_UP)
             .await?;
         Ok(())
     }

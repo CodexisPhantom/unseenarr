@@ -272,7 +272,7 @@ whatever episodes the release covers.
 |---|---|---|
 | `settings` | `key` text PK, `value` json, `updated_at` | |
 | `scheduled_tasks` | `name` text PK, `interval_seconds` int, `last_run_at` null, `last_status` null, `last_error` null | |
-| `import_sources` | `id` int PK, `kind` text (`radarr`), `name`, `url`, `api_key` (secret), `target_quality_profile_id` int null FK set null, `remote_path` null, `local_path` null, `last_import_at` null, `created_at`, `updated_at` | unique(`url`), both path columns set or both null |
+| `import_sources` | `id` int PK, `kind` text (`radarr` or `prowlarr`), `name`, `url`, `api_key` (secret), `target_quality_profile_id` int null FK set null, `remote_path` null, `local_path` null, `last_import_at` null, `created_at`, `updated_at` | unique(`url`), both path columns set or both null |
 | `trash_guide_items` | `id` int PK, `kind` text (`custom_format`, `cf_group`, `quality_profile`, `quality_size`), `trash_id` text, `name`, `data` json, `guide_commit` text, `updated_at` | unique(`kind`, `trash_id`) |
 | `import_map` | `source_id` int FK cascade, `resource` text, `source_resource_id` int, `local_id` int | PK(`source_id`, `resource`, `source_resource_id`) |
 
